@@ -130,6 +130,20 @@ function M.shell_quote(value)
   return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
 end
 
+function M.format_bytes(bytes)
+  local units = { "B", "KiB", "MiB", "GiB", "TiB" }
+  local value = tonumber(bytes) or 0
+  local unit = 1
+  while value >= 1024 and unit < #units do
+    value = value / 1024
+    unit = unit + 1
+  end
+  if unit == 1 then
+    return ("%d %s"):format(value, units[unit])
+  end
+  return ("%.1f %s"):format(value, units[unit])
+end
+
 function M.notify(message, level)
   vim.notify("remote-mirror: " .. message, level or vim.log.levels.INFO)
 end

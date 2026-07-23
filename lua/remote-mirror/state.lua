@@ -10,6 +10,10 @@ function M.new(config)
       version = 1,
       project = {
         host = config.host,
+        user = config.user,
+        port = config.port,
+        auth = config.auth or "ssh",
+        ssh_config_file = config.ssh_config_file,
         remote_root = config.remote_root,
       },
       files = {},
@@ -29,6 +33,9 @@ function M:load()
   assert(decoded.version == 1, "remote-mirror: unsupported state version")
   decoded.files = decoded.files or {}
   decoded.conflicts = decoded.conflicts or {}
+  -- A reused mirror must describe the workspace selected for this connection,
+  -- not the endpoint that happened to create its first state file.
+  decoded.project = self.data.project
   self.data = decoded
   return self
 end

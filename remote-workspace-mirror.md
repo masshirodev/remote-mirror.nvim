@@ -170,6 +170,21 @@ changes that buffer events cannot observe.
 The remote project is authoritative until a local change is uploaded. Before
 uploading, compare the remote hash with the hash recorded at the last sync.
 
+When connecting to an existing local mirror, never choose a broad overwrite
+direction implicitly. Offer three confirmed reconciliation modes:
+
+1. **Force pull:** remote wins, including deletion of local-only files.
+2. **Force push:** local wins, including deletion of remote-only files.
+3. **Review:** use a single editable buffer with one `pull`, `push`, or `skip`
+   action per changed path. Default every action to `pull` and require a final
+   confirmation before applying the buffer.
+
+The review comparison is read-only. Cancelling it must not advance sync
+baselines. A reviewed push must also verify that the remote file still matches
+the version displayed by the review, so a later remote edit cannot be
+overwritten by a stale decision. Bulk reconciliation applies only to the
+mirrored scope; ignored paths remain protected from transfer and deletion.
+
 Possible commands:
 
 ```vim

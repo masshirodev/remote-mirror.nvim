@@ -7,6 +7,7 @@ local defaults = {
   debounce_ms = 200,
   watch = true,
   watch_debounce_ms = 300,
+  ssh_connect_timeout = 10,
   ssh_command = "ssh",
   rsync_command = "rsync",
   rsync_args = { "-az" },
@@ -25,6 +26,10 @@ local function assert_string(options, key)
 end
 
 function M.normalize(options)
+  if options and options.port == "" then
+    options = vim.tbl_deep_extend("force", {}, options)
+    options.port = nil
+  end
   options = vim.tbl_deep_extend("force", defaults, options or {})
   assert_string(options, "host")
   assert_string(options, "remote_root")
@@ -38,11 +43,33 @@ function M.normalize(options)
   options.state_root = vim.fs.normalize(options.state_root or util.join(mirror_root, ".remote-state"))
   options.tree_root = vim.fs.normalize(options.tree_root or util.join(mirror_root, ".remote-tree"))
   options.remote_root = options.remote_root:gsub("/+$", "")
+  options.port = options.port and tonumber(options.port) or nil
 
+  if options.port then
+    assert(options.port % 1 == 0, "remote-mirror: port must be an integer")
+    assert(options.port >= 1 and options.port <= 65535, "remote-mirror: port must be between 1 and 65535")
+  end
+  if options.user ~= nil then
+    assert(
+      type(options.user) == "string" and options.user:match("^[%w._-]+$"),
+      "remote-mirror: user contains unsupported characters"
+    )
+  end
+  if options.ssh_config_file ~= nil then
+    assert(
+      type(options.ssh_config_file) == "string" and options.ssh_config_file:sub(1, 1) == "/",
+      "remote-mirror: ssh_config_file must be an absolute path"
+    )
+  end
+  assert(
+    options.auth == nil or options.auth == "ssh" or options.auth == "password",
+    "remote-mirror: auth must be ssh or password"
+  )
   assert(type(options.rsync_args) == "table", "remote-mirror: rsync_args must be a table")
   assert(type(options.default_ignore) == "table", "remote-mirror: default_ignore must be a table")
   assert(options.debounce_ms >= 0, "remote-mirror: debounce_ms must be non-negative")
   assert(options.watch_debounce_ms >= 0, "remote-mirror: watch_debounce_ms must be non-negative")
+  assert(options.ssh_connect_timeout >= 1, "remote-mirror: ssh_connect_timeout must be positive")
 
   return options
 end

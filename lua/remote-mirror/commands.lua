@@ -11,6 +11,16 @@ local function safely(callback)
   end
 end
 
+local function enqueue(core, operation, on_success)
+  core:enqueue(operation, function(ok, result)
+    if not ok then
+      util.notify(result, vim.log.levels.ERROR)
+      return
+    end
+    on_success(result)
+  end)
+end
+
 function M.register(manager)
   local group = vim.api.nvim_create_augroup("RemoteMirror", { clear = true })
   local command_names = {
@@ -30,18 +40,30 @@ function M.register(manager)
   end), { desc = "Open the remote workspace connection screen" })
 
   vim.api.nvim_create_user_command("RemoteMirrorPull", safely(function()
-    local result = manager:require_current():pull()
-    util.notify(("pulled %d remote files; protected %d local changes"):format(result.files, #result.protected))
+    local core = manager:require_current()
+    enqueue(core, function()
+      return core:pull()
+    end, function(result)
+      util.notify(("pulled %d remote files; protected %d local changes"):format(result.files, #result.protected))
+    end)
   end), { desc = "Pull the active remote workspace" })
 
   vim.api.nvim_create_user_command("RemoteMirrorPush", safely(function()
-    local result = manager:require_current():push()
-    util.notify(("pushed %d files; %d conflicts"):format(result.pushed, result.conflicts))
+    local core = manager:require_current()
+    enqueue(core, function()
+      return core:push()
+    end, function(result)
+      util.notify(("pushed %d files; %d conflicts"):format(result.pushed, result.conflicts))
+    end)
   end), { desc = "Push changes in the active remote workspace" })
 
   vim.api.nvim_create_user_command("RemoteMirrorRefresh", safely(function()
-    local result = manager:require_current():refresh()
-    util.notify(("found %d remote changes; %d conflicts"):format(result.changed, result.conflicts))
+    local core = manager:require_current()
+    enqueue(core, function()
+      return core:refresh()
+    end, function(result)
+      util.notify(("found %d remote changes; %d conflicts"):format(result.changed, result.conflicts))
+    end)
   end), { desc = "Refresh the active remote manifest" })
 
   vim.api.nvim_create_user_command("RemoteMirrorConflicts", safely(function()
@@ -56,8 +78,13 @@ function M.register(manager)
   vim.api.nvim_create_user_command("RemoteMirrorResolve", safely(function(options)
     local path, strategy = options.args:match("^(%S+)%s+(%S+)$")
     assert(path and strategy, "usage: RemoteMirrorResolve <path> <pull|push>")
-    manager:require_current():resolve(path, strategy)
-    util.notify(("resolved %s using %s"):format(path, strategy))
+    local core = manager:require_current()
+    enqueue(core, function()
+      core:resolve(path, strategy)
+      return true
+    end, function()
+      util.notify(("resolved %s using %s"):format(path, strategy))
+    end)
   end), {
     nargs = "+",
     desc = "Resolve a conflict with the local or remote version",
