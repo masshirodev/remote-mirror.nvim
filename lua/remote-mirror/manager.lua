@@ -14,12 +14,24 @@ local workspace_keys = {
   "user",
   "port",
   "auth",
+  "transfer",
   "ssh_config_file",
+  "ssh_command",
+  "ssh_args",
+  "rsync_command",
+  "rsync_args",
+  "scp_command",
+  "scp_args",
+  "remote_find_command",
+  "remote_stat_command",
+  "remote_sha256sum_command",
+  "remote_du_command",
   "remote_root",
   "mirror_root",
   "source_root",
   "state_root",
   "tree_root",
+  "default_ignore",
 }
 
 function M.new(options)
@@ -34,7 +46,7 @@ function M.new(options)
   }, M)
 
   for _, workspace in ipairs(options.workspaces or {}) do
-    manager.registry:add(Config.normalize(vim.tbl_deep_extend("force", options, workspace)))
+    manager.registry:add(manager:workspace_options(workspace))
   end
   return manager
 end
@@ -63,6 +75,7 @@ function M:update_connection(name, connection)
   updated.user = connection.user
   updated.port = connection.port
   updated.auth = connection.auth
+  updated.transfer = connection.transfer or workspace.transfer or "rsync"
   return self:add(updated)
 end
 
@@ -78,8 +91,11 @@ function M:has_password(name)
   return self.credentials[name] ~= nil
 end
 
-function M:resolve_ssh(host)
-  return require("remote-mirror.ssh_config").resolve(self.options.ssh_command or "ssh", host)
+function M:resolve_ssh(host, ssh_command)
+  return require("remote-mirror.ssh_config").resolve(
+    ssh_command or self.options.ssh_command or "ssh",
+    host
+  )
 end
 
 function M:list()
@@ -110,7 +126,7 @@ end
 function M:_build_core(name)
   local workspace = assert(self.registry.workspaces[name], "remote-mirror: unknown workspace " .. name)
   local config = self:workspace_options(workspace)
-  local resolved = self:resolve_ssh(config.host)
+  local resolved = self:resolve_ssh(config.host, config.ssh_command)
   config.ssh_config_file = config.ssh_config_file or resolved.config_file
   if config.auth == "password" then
     config._password = assert(
@@ -142,7 +158,7 @@ function M:connect(name)
   end
 
   local config = self:workspace_options(workspace)
-  local resolved = self:resolve_ssh(config.host)
+  local resolved = self:resolve_ssh(config.host, config.ssh_command)
   config.ssh_config_file = config.ssh_config_file or resolved.config_file
   if config.auth == "password" then
     config._password = assert(
@@ -259,7 +275,7 @@ function M:inspect_workspace_async(workspace, password, callback)
     callback(false, config)
     return
   end
-  local resolved = self:resolve_ssh(config.host)
+  local resolved = self:resolve_ssh(config.host, config.ssh_command)
   config.ssh_config_file = config.ssh_config_file or resolved.config_file
   if config.auth == "password" then
     config._password = password
@@ -283,7 +299,7 @@ function M:estimate_workspace_async(workspace, password, remote_ignore, callback
     callback(false, config)
     return
   end
-  local resolved = self:resolve_ssh(config.host)
+  local resolved = self:resolve_ssh(config.host, config.ssh_command)
   config.ssh_config_file = config.ssh_config_file or resolved.config_file
   if config.auth == "password" then
     config._password = password
@@ -293,7 +309,7 @@ function M:estimate_workspace_async(workspace, password, remote_ignore, callback
   util.write_file(filter_path, Ignore.compile(config.default_ignore, remote_ignore, {}))
   local transport = Transport.new(config, require("remote-mirror.async").runner)
   require("remote-mirror.async").run(function()
-    return transport:estimate(filter_path)
+    return transport:estimate(filter_path, remote_ignore)
   end, callback)
 end
 
@@ -303,7 +319,7 @@ function M:write_remote_ignore_async(workspace, password, contents, callback)
     callback(false, config)
     return
   end
-  local resolved = self:resolve_ssh(config.host)
+  local resolved = self:resolve_ssh(config.host, config.ssh_command)
   config.ssh_config_file = config.ssh_config_file or resolved.config_file
   if config.auth == "password" then
     config._password = password

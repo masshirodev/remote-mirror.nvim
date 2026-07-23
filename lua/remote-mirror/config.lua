@@ -9,8 +9,16 @@ local defaults = {
   watch_debounce_ms = 300,
   ssh_connect_timeout = 10,
   ssh_command = "ssh",
+  ssh_args = {},
+  transfer = "rsync",
   rsync_command = "rsync",
   rsync_args = { "-az" },
+  scp_command = "scp",
+  scp_args = {},
+  remote_find_command = "find",
+  remote_stat_command = "stat",
+  remote_sha256sum_command = "sha256sum",
+  remote_du_command = "du",
   default_ignore = {
     "node_modules/",
     "target/",
@@ -26,11 +34,17 @@ local function assert_string(options, key)
 end
 
 function M.normalize(options)
+  local overrides = options or {}
   if options and options.port == "" then
     options = vim.tbl_deep_extend("force", {}, options)
     options.port = nil
   end
   options = vim.tbl_deep_extend("force", defaults, options or {})
+  for _, key in ipairs({ "ssh_args", "rsync_args", "scp_args", "default_ignore" }) do
+    if overrides[key] ~= nil then
+      options[key] = vim.deepcopy(overrides[key])
+    end
+  end
   assert_string(options, "host")
   assert_string(options, "remote_root")
 
@@ -65,7 +79,33 @@ function M.normalize(options)
     options.auth == nil or options.auth == "ssh" or options.auth == "password",
     "remote-mirror: auth must be ssh or password"
   )
-  assert(type(options.rsync_args) == "table", "remote-mirror: rsync_args must be a table")
+  assert(
+    options.transfer == "rsync" or options.transfer == "scp",
+    "remote-mirror: transfer must be rsync or scp"
+  )
+  for _, key in ipairs({
+    "ssh_command",
+    "rsync_command",
+    "scp_command",
+    "remote_find_command",
+    "remote_stat_command",
+    "remote_sha256sum_command",
+    "remote_du_command",
+  }) do
+    assert_string(options, key)
+  end
+  for _, key in ipairs({ "remote_find_command", "remote_stat_command", "remote_sha256sum_command", "remote_du_command" }) do
+    assert(
+      options[key]:match("^[%w._/%-]+$"),
+      ("remote-mirror: %s must be an executable name or absolute path"):format(key)
+    )
+  end
+  for _, key in ipairs({ "ssh_args", "rsync_args", "scp_args" }) do
+    assert(type(options[key]) == "table", ("remote-mirror: %s must be a table"):format(key))
+    for _, argument in ipairs(options[key]) do
+      assert(type(argument) == "string", ("remote-mirror: %s must contain strings"):format(key))
+    end
+  end
   assert(type(options.default_ignore) == "table", "remote-mirror: default_ignore must be a table")
   assert(options.debounce_ms >= 0, "remote-mirror: debounce_ms must be non-negative")
   assert(options.watch_debounce_ms >= 0, "remote-mirror: watch_debounce_ms must be non-negative")

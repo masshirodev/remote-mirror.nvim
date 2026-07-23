@@ -1,14 +1,9 @@
+local Ignore = require("remote-mirror.ignore")
 local process = require("remote-mirror.process")
 local util = require("remote-mirror.util")
 
 local M = {}
 M.__index = M
-
-local manifest_script = [[
-set -eu
-cd %s
-find . -type f -printf "%%s\t%%T@\t%%P\n"
-]]
 
 function M.new(config, runner)
   return setmetatable({
@@ -48,6 +43,37 @@ function M:ssh_arguments()
       "PubkeyAuthentication=no",
     })
   end
+  vim.list_extend(arguments, self.config.ssh_args)
+  return arguments
+end
+
+function M:scp_arguments()
+  local arguments = { self.config.scp_command }
+  if self.config.ssh_config_file then
+    vim.list_extend(arguments, { "-F", self.config.ssh_config_file })
+  end
+  vim.list_extend(arguments, {
+    "-o",
+    "ConnectTimeout=" .. self.config.ssh_connect_timeout,
+    "-o",
+    "ServerAliveInterval=15",
+    "-o",
+    "ServerAliveCountMax=2",
+    "-o",
+    "NumberOfPasswordPrompts=1",
+  })
+  if self.config.port then
+    vim.list_extend(arguments, { "-P", tostring(self.config.port) })
+  end
+  if self.config.auth == "password" then
+    vim.list_extend(arguments, {
+      "-o",
+      "PreferredAuthentications=password,keyboard-interactive",
+      "-o",
+      "PubkeyAuthentication=no",
+    })
+  end
+  vim.list_extend(arguments, self.config.scp_args)
   return arguments
 end
 
@@ -83,13 +109,31 @@ function M:remote_spec(path)
   return self.config.host .. ":" .. path
 end
 
+function M:scp_remote_spec(path)
+  local host = self.config.host
+  if host:find(":", 1, true) and host:sub(1, 1) ~= "[" then
+    host = "[" .. host .. "]"
+  end
+  if self.config.user then
+    host = self.config.user .. "@" .. host
+  end
+  return host .. ":" .. path
+end
+
 function M:rsync_shell()
   local arguments = self:ssh_arguments()
   return table.concat(arguments, " ")
 end
 
 function M:manifest()
-  local command = manifest_script:format(util.shell_quote(self.config.remote_root))
+  local command = ([[
+set -eu
+cd %s
+%s . -type f -printf "%%s\t%%T@\t%%P\n"
+]]):format(
+    util.shell_quote(self.config.remote_root),
+    util.shell_quote(self.config.remote_find_command)
+  )
   local result = self:ssh(command)
   local manifest = {}
 
@@ -112,12 +156,19 @@ function M:inspect(path)
   local command = ([[
 if [ -f %s ]; then
   size=$(wc -c < %s)
-  mtime=$(stat -c %%Y %s)
-  hash=$(sha256sum %s)
+  mtime=$(%s -c %%Y %s)
+  hash=$(%s %s)
   hash=${hash%%%% *}
   printf "%%s\t%%s\t%%s\n" "$hash" "$size" "$mtime"
 fi
-]]):format(quoted, quoted, quoted, quoted)
+]]):format(
+    quoted,
+    quoted,
+    util.shell_quote(self.config.remote_stat_command),
+    quoted,
+    util.shell_quote(self.config.remote_sha256sum_command),
+    quoted
+  )
   local result = self:ssh(command)
   local hash, size, mtime = result.stdout:match("^(%x+)\t(%d+)\t(%d+)")
   if not hash then
@@ -129,6 +180,27 @@ fi
     mtime = tonumber(mtime),
     signature = size .. ":" .. mtime,
   }
+end
+
+function M:hash_manifest()
+  local command = ([[
+set -eu
+cd %s
+%s . -type f -exec %s -- {} +
+]]):format(
+    util.shell_quote(self.config.remote_root),
+    util.shell_quote(self.config.remote_find_command),
+    util.shell_quote(self.config.remote_sha256sum_command)
+  )
+  local result = self:ssh(command)
+  local hashes = {}
+  for line in result.stdout:gmatch("[^\r\n]+") do
+    local hash, path = line:match("^(%x+)%s+%*?(.+)$")
+    if hash and path then
+      hashes[path:gsub("^%./", "")] = hash
+    end
+  end
+  return hashes
 end
 
 function M:remote_ignore()
@@ -159,7 +231,29 @@ function M:write_remote_ignore(contents)
   self:ssh(command, { stdin = contents })
 end
 
-function M:estimate(filter_path)
+function M:_remote_ignore_rules(remote_contents)
+  return remote_contents ~= nil and remote_contents or self:remote_ignore()
+end
+
+function M:_included(path, remote_contents)
+  return not Ignore.is_ignored(path, self.config.default_ignore, remote_contents)
+end
+
+function M:_scp_estimate(remote_contents)
+  local size, files = 0, 0
+  for path, metadata in pairs(self:manifest()) do
+    if self:_included(path, remote_contents) then
+      size = size + metadata.size
+      files = files + 1
+    end
+  end
+  return { size = size, files = files }
+end
+
+function M:estimate(filter_path, remote_contents)
+  if self.config.transfer == "scp" then
+    return self:_scp_estimate(self:_remote_ignore_rules(remote_contents))
+  end
   local destination = util.join(self.config.state_root, "estimate")
   util.ensure_dir(destination)
   local command = { self.config.rsync_command }
@@ -192,10 +286,14 @@ function M:workspace_stats()
   local command = ([[
 set -eu
 cd %s
-size=$(du -sb . | awk '{print $1}')
-files=$(find . -type f | wc -l)
+size=$(%s -sb . | awk '{print $1}')
+files=$(%s . -type f | wc -l)
 printf "%%s\t%%s\n" "$size" "$files"
-]]):format(root)
+]]):format(
+    root,
+    util.shell_quote(self.config.remote_du_command),
+    util.shell_quote(self.config.remote_find_command)
+  )
   local result = self:ssh(command)
   local size, files = result.stdout:match("^(%d+)\t%s*(%d+)")
   assert(size and files, "remote-mirror: could not read remote workspace size")
@@ -205,7 +303,10 @@ printf "%%s\t%%s\n" "$size" "$files"
   }
 end
 
-function M:pull(filter_path)
+function M:pull(filter_path, protected)
+  if self.config.transfer == "scp" then
+    return self:_scp_pull(protected)
+  end
   util.ensure_dir(self.config.source_root)
   local command = { self.config.rsync_command }
   vim.list_extend(command, self.config.rsync_args)
@@ -221,6 +322,9 @@ function M:pull(filter_path)
 end
 
 function M:push(filter_path)
+  if self.config.transfer == "scp" then
+    return self:_scp_push()
+  end
   local command = { self.config.rsync_command }
   vim.list_extend(command, self.config.rsync_args)
   vim.list_extend(command, {
@@ -235,6 +339,9 @@ function M:push(filter_path)
 end
 
 function M:changes(filter_path)
+  if self.config.transfer == "scp" then
+    return self:_scp_changes()
+  end
   util.ensure_dir(self.config.source_root)
   local command = { self.config.rsync_command }
   vim.list_extend(command, self.config.rsync_args)
@@ -282,14 +389,23 @@ end
 function M:download(path)
   local destination = util.join(self.config.source_root, path)
   util.ensure_dir(vim.fs.dirname(destination))
-  local command = { self.config.rsync_command }
-  vim.list_extend(command, self.config.rsync_args)
-  vim.list_extend(command, {
-    "--protect-args",
-    "--rsh=" .. self:rsync_shell(),
-    self:remote_spec(self.config.remote_root .. "/" .. path),
-    destination,
-  })
+  local command
+  if self.config.transfer == "scp" then
+    command = self:scp_arguments()
+    vim.list_extend(command, {
+      self:scp_remote_spec(self.config.remote_root .. "/" .. path),
+      destination,
+    })
+  else
+    command = { self.config.rsync_command }
+    vim.list_extend(command, self.config.rsync_args)
+    vim.list_extend(command, {
+      "--protect-args",
+      "--rsh=" .. self:rsync_shell(),
+      self:remote_spec(self.config.remote_root .. "/" .. path),
+      destination,
+    })
+  end
   return self.run(command, self:process_options())
 end
 
@@ -298,19 +414,122 @@ function M:upload(path)
   local remote_directory = vim.fs.dirname(self.config.remote_root .. "/" .. path)
   self:ssh("mkdir -p " .. util.shell_quote(remote_directory))
 
-  local command = { self.config.rsync_command }
-  vim.list_extend(command, self.config.rsync_args)
-  vim.list_extend(command, {
-    "--protect-args",
-    "--rsh=" .. self:rsync_shell(),
-    source,
-    self:remote_spec(self.config.remote_root .. "/" .. path),
-  })
+  local command
+  if self.config.transfer == "scp" then
+    command = self:scp_arguments()
+    vim.list_extend(command, {
+      source,
+      self:scp_remote_spec(self.config.remote_root .. "/" .. path),
+    })
+  else
+    command = { self.config.rsync_command }
+    vim.list_extend(command, self.config.rsync_args)
+    vim.list_extend(command, {
+      "--protect-args",
+      "--rsh=" .. self:rsync_shell(),
+      source,
+      self:remote_spec(self.config.remote_root .. "/" .. path),
+    })
+  end
   return self.run(command, self:process_options())
 end
 
 function M:delete(path)
   return self:ssh("rm -f -- " .. util.shell_quote(self.config.remote_root .. "/" .. path))
+end
+
+function M:_scp_pull(protected)
+  local remote_contents = self:_remote_ignore_rules()
+  local remote = self:manifest()
+  local local_files = util.walk_files(self.config.source_root)
+  local paths = vim.tbl_keys(remote)
+  local protected_paths = {}
+  for _, path in ipairs(protected or {}) do
+    protected_paths[path] = true
+  end
+  table.sort(paths)
+
+  for _, path in ipairs(paths) do
+    if self:_included(path, remote_contents) and not protected_paths[path] then
+      self:download(path)
+    end
+  end
+  for path in pairs(local_files) do
+    if self:_included(path, remote_contents) and not protected_paths[path] and not remote[path] then
+      local absolute = util.join(self.config.source_root, path)
+      local removed, err = os.remove(absolute)
+      assert(
+        removed or not util.is_file(absolute),
+        ("remote-mirror: could not delete local file %s: %s"):format(path, err or "unknown error")
+      )
+    end
+  end
+  return { code = 0, stdout = "", stderr = "" }
+end
+
+function M:_scp_push()
+  local remote_contents = self:_remote_ignore_rules()
+  local remote = self:manifest()
+  local local_files = util.walk_files(self.config.source_root)
+  local paths = vim.tbl_keys(local_files)
+  table.sort(paths)
+
+  for _, path in ipairs(paths) do
+    if self:_included(path, remote_contents) then
+      self:upload(path)
+    end
+  end
+  for path in pairs(remote) do
+    if self:_included(path, remote_contents) and not local_files[path] then
+      self:delete(path)
+    end
+  end
+  return { code = 0, stdout = "", stderr = "" }
+end
+
+function M:_scp_changes()
+  local remote_contents = self:_remote_ignore_rules()
+  local remote = self:manifest()
+  local remote_hashes = self:hash_manifest()
+  local local_files = util.walk_files(self.config.source_root)
+  local paths = {}
+  for path in pairs(remote) do
+    paths[path] = true
+  end
+  for path in pairs(local_files) do
+    paths[path] = true
+  end
+
+  local changes = {}
+  for path in pairs(paths) do
+    if self:_included(path, remote_contents) then
+      local local_hash = local_files[path]
+      local remote_metadata = remote[path]
+      if local_hash and not remote_metadata then
+        table.insert(changes, {
+          path = path,
+          kind = "local_only",
+          local_exists = true,
+          remote_exists = false,
+        })
+      elseif remote_metadata then
+        local remote_hash = remote_hashes[path]
+        if not local_hash or local_hash ~= remote_hash then
+          table.insert(changes, {
+            path = path,
+            kind = local_hash and "modified" or "remote_only",
+            local_exists = local_hash ~= nil,
+            remote_exists = true,
+            remote_hash = remote_hash,
+          })
+        end
+      end
+    end
+  end
+  table.sort(changes, function(left, right)
+    return left.path < right.path
+  end)
+  return changes
 end
 
 return M

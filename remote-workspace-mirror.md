@@ -217,11 +217,21 @@ their local tools require.
 Use batched SSH operations rather than one connection per file:
 
 - `rsync` for initial sync and bulk reconciliation;
+- `scp` as a compatibility fallback when remote rsync is unavailable;
 - `scp` or rsync for individual saves;
 - SSH commands for manifest, hashes, mkdir, delete, and conflict checks.
 
 The transport should reuse the user's SSH config, identity, port, and host
 aliases.
+
+The selected transport and executable/argument overrides are workspace
+settings. Rsync remains the preferred backend. The SCP backend derives the
+mirrored set from the manifest and `.remoteignore`, transfers files
+individually, and explicitly handles one-sided deletions. This preserves the
+same reconciliation semantics at the cost of slower bulk operations.
+
+Supported overrides include local SSH, rsync, and SCP executables and arguments,
+plus GNU-compatible remote `find`, `stat`, `sha256sum`, and `du` executables.
 
 ## Proposed MVP
 

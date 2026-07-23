@@ -11,7 +11,7 @@ local function prompt(label, callback)
 end
 
 local function prompt_connection(manager, workspace, callback)
-  local resolved = manager:resolve_ssh(workspace.host)
+  local resolved = manager:resolve_ssh(workspace.host, workspace.ssh_command)
   if resolved.error and resolved.error ~= "" then
     util.notify("could not inspect SSH config; using standard defaults", vim.log.levels.WARN)
   end
@@ -39,12 +39,23 @@ local function prompt_connection(manager, workspace, callback)
         util.notify(password, vim.log.levels.ERROR)
         return
       end
-      callback({
-        user = user ~= "" and user or nil,
-        port = port ~= "" and port or nil,
-        auth = password ~= "" and "password" or "ssh",
-        ssh_config_file = resolved.config_file,
-      }, password)
+      local current_transfer = workspace.transfer or "rsync"
+      local preferred = current_transfer == "scp" and "SCP (fallback)" or "rsync (recommended)"
+      local alternate = current_transfer == "scp" and "rsync (recommended)" or "SCP (fallback)"
+      vim.ui.select({ preferred, alternate, "Cancel" }, {
+        prompt = "File transfer method:",
+      }, function(choice)
+        if choice == nil or choice == "Cancel" then
+          return
+        end
+        callback({
+          user = user ~= "" and user or nil,
+          port = port ~= "" and port or nil,
+          auth = password ~= "" and "password" or "ssh",
+          transfer = choice:match("^SCP") and "scp" or "rsync",
+          ssh_config_file = resolved.config_file,
+        }, password)
+      end)
     end)
   end)
 end
@@ -308,9 +319,10 @@ function M.open(manager)
     local active = manager.current and manager.current.config.name == workspace.name
     table.insert(
       lines,
-      ("%s %-24s %s@%s:%s %s"):format(
+      ("%s %-24s %-5s %s@%s:%s %s"):format(
         active and "*" or " ",
         workspace.name,
+        workspace.transfer or "rsync",
         workspace.user or "ssh-config",
         workspace.host,
         workspace.port or "config/22",
@@ -483,7 +495,8 @@ function M.open_workspace(manager, core)
   table.sort(paths)
   local lines = {
     ("Remote Workspace: %s"):format(core.config.name),
-    ("%s@%s:%s %s"):format(
+    ("via %s | %s@%s:%s %s"):format(
+      core.config.transfer,
       core.config.user or "ssh-config",
       core.config.host,
       core.config.port or "config/22",

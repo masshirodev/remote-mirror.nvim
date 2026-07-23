@@ -51,6 +51,42 @@ test("normalizes a workspace-specific SSH port", function()
   assert_equal(65002, config.port)
 end)
 
+test("normalizes SCP and command overrides without restoring default arguments", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    transfer = "scp",
+    ssh_command = "/opt/bin/ssh",
+    ssh_args = { "-o", "Compression=yes" },
+    scp_command = "/opt/bin/scp",
+    scp_args = {},
+    rsync_args = {},
+  })
+  assert_equal("scp", config.transfer)
+  assert_equal("/opt/bin/ssh", config.ssh_command)
+  assert_equal({ "-o", "Compression=yes" }, config.ssh_args)
+  assert_equal("/opt/bin/scp", config.scp_command)
+  assert_equal({}, config.scp_args)
+  assert_equal({}, config.rsync_args)
+end)
+
+test("preserves workspace-specific argument-list overrides during setup", function()
+  local manager = require("remote-mirror.manager").new({
+    registry_path = vim.fn.tempname() .. "/workspaces.json",
+    scp_args = { "-O" },
+    workspaces = {
+      {
+        name = "website",
+        host = "server",
+        remote_root = "/srv/example",
+        transfer = "scp",
+        scp_args = {},
+      },
+    },
+  })
+  assert_equal({}, manager.registry.workspaces.website.scp_args)
+end)
+
 test("resolves SSH config defaults", function()
   local runner = function(command)
     assert_equal({ "ssh", "-G", "example" }, command)
@@ -108,6 +144,23 @@ test("compiles defaults, re-includes, and protected paths", function()
   assert(rules:find("+ /src/generated/", 1, true))
   assert(rules:find("+ /src/generated/schema.json", 1, true))
   assert(rules:find("- node_modules/***", 1, true))
+end)
+
+test("matches ignore rules locally for SCP transfers", function()
+  local ignore = require("remote-mirror.ignore")
+  local defaults = { "node_modules/", "*.log", "/root-only.txt", "dist/" }
+  local remote = table.concat({
+    "src/generated/",
+    "!src/generated/schema.json",
+  }, "\n")
+  assert_equal(true, ignore.is_ignored("node_modules/package/index.js", defaults, remote))
+  assert_equal(true, ignore.is_ignored("src/node_modules/index.js", defaults, remote))
+  assert_equal(true, ignore.is_ignored("src/debug.log", defaults, remote))
+  assert_equal(true, ignore.is_ignored("root-only.txt", defaults, remote))
+  assert_equal(false, ignore.is_ignored("src/root-only.txt", defaults, remote))
+  assert_equal(true, ignore.is_ignored("src/generated/other.json", defaults, remote))
+  assert_equal(false, ignore.is_ignored("src/generated/schema.json", defaults, remote))
+  assert_equal(false, ignore.is_ignored("src/main.lua", defaults, remote))
 end)
 
 test("quotes remote shell paths", function()
@@ -183,6 +236,33 @@ test("hashes only a specifically inspected remote file", function()
   assert_equal(64, #inspected.hash)
 end)
 
+test("parses a remote hash manifest in one SSH operation", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+    remote_find_command = "/opt/bin/gfind",
+    remote_sha256sum_command = "/opt/bin/gsha256sum",
+  })
+  local captured
+  local runner = function(command)
+    captured = command
+    return {
+      code = 0,
+      stdout = table.concat({
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  ./src/main.lua",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb *./file with spaces.txt",
+      }, "\n"),
+      stderr = "",
+    }
+  end
+  local hashes = require("remote-mirror.transport").new(config, runner):hash_manifest()
+  assert(captured[#captured]:find("/opt/bin/gfind", 1, true))
+  assert(captured[#captured]:find("/opt/bin/gsha256sum", 1, true))
+  assert_equal(64, #hashes["src/main.lua"])
+  assert_equal(64, #hashes["file with spaces.txt"])
+end)
+
 test("reads remote workspace size and file count", function()
   local config = require("remote-mirror.config").normalize({
     host = "server",
@@ -254,6 +334,30 @@ test("parses an rsync dry-run estimate", function()
   local estimate = require("remote-mirror.transport").new(config, runner):estimate("/tmp/filter")
   assert_equal(124780544, estimate.size)
   assert_equal(12345, estimate.files)
+end)
+
+test("estimates an SCP mirror from the manifest and ignore rules", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+    transfer = "scp",
+    default_ignore = { "vendor/" },
+  })
+  local runner = function()
+    return {
+      code = 0,
+      stdout = table.concat({
+        "10\t1.0\tmain.lua",
+        "1000\t1.0\tvendor/library.lua",
+        "20\t1.0\tdocs/readme.md",
+      }, "\n"),
+      stderr = "",
+    }
+  end
+  local estimate = require("remote-mirror.transport").new(config, runner):estimate(nil, "")
+  assert_equal(30, estimate.size)
+  assert_equal(2, estimate.files)
 end)
 
 test("lists checksum differences for reconnect review", function()
@@ -391,6 +495,183 @@ test("passes a workspace port to SSH and rsync", function()
   assert_contains(commands[1], "server")
   assert_contains(commands[2], "--protect-args")
   assert(find_prefixed(commands[2], "--rsh="):find("-p 65002", 1, true))
+end)
+
+test("passes connection and executable overrides to SCP", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    user = "deploy",
+    port = 65002,
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+    transfer = "scp",
+    ssh_command = "custom-ssh",
+    ssh_args = { "-o", "Compression=yes" },
+    scp_command = "custom-scp",
+    scp_args = { "-O" },
+  })
+  local commands = {}
+  local runner = function(command)
+    table.insert(commands, command)
+    return { code = 0, stdout = "", stderr = "" }
+  end
+  local transport = require("remote-mirror.transport").new(config, runner)
+  transport:download("src/main.lua")
+  assert_equal("custom-scp", commands[1][1])
+  assert_contains(commands[1], "-P")
+  assert_contains(commands[1], "65002")
+  assert_contains(commands[1], "-O")
+  assert_equal("deploy@server:/srv/example/src/main.lua", commands[1][#commands[1] - 1])
+  transport:ssh("true")
+  assert_equal("custom-ssh", commands[2][1])
+  assert_contains(commands[2], "Compression=yes")
+end)
+
+test("SCP force pull transfers included files and preserves ignored paths", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+    transfer = "scp",
+    default_ignore = { "vendor/" },
+  })
+  local util = require("remote-mirror.util")
+  util.ensure_dir(util.join(config.source_root, "vendor"))
+  util.write_file(util.join(config.source_root, "local-only.lua"), "remove\n")
+  util.write_file(util.join(config.source_root, "vendor/local.lua"), "preserve\n")
+  local transport = require("remote-mirror.transport").new(config, function()
+    error("runner should not be used")
+  end)
+  transport.remote_ignore = function()
+    return ""
+  end
+  transport.manifest = function()
+    return {
+      ["main.lua"] = { size = 4 },
+      ["vendor/remote.lua"] = { size = 4 },
+    }
+  end
+  local downloaded = {}
+  transport.download = function(_, path)
+    table.insert(downloaded, path)
+  end
+  transport:_scp_pull()
+  assert_equal({ "main.lua" }, downloaded)
+  assert_equal(false, util.is_file(util.join(config.source_root, "local-only.lua")))
+  assert_equal(true, util.is_file(util.join(config.source_root, "vendor/local.lua")))
+end)
+
+test("SCP protected pull does not overwrite or delete local changes", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+    transfer = "scp",
+  })
+  local util = require("remote-mirror.util")
+  util.ensure_dir(config.source_root)
+  util.write_file(util.join(config.source_root, "modified.lua"), "local\n")
+  util.write_file(util.join(config.source_root, "local-only.lua"), "local\n")
+  local transport = require("remote-mirror.transport").new(config, function()
+    error("runner should not be used")
+  end)
+  transport.remote_ignore = function()
+    return ""
+  end
+  transport.manifest = function()
+    return {
+      ["modified.lua"] = { size = 6 },
+    }
+  end
+  local downloaded = {}
+  transport.download = function(_, path)
+    table.insert(downloaded, path)
+  end
+  transport:_scp_pull({ "modified.lua", "local-only.lua" })
+  assert_equal({}, downloaded)
+  assert_equal(true, util.is_file(util.join(config.source_root, "modified.lua")))
+  assert_equal(true, util.is_file(util.join(config.source_root, "local-only.lua")))
+end)
+
+test("SCP force push transfers included files and protects ignored remote files", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+    transfer = "scp",
+    default_ignore = { "vendor/" },
+  })
+  local util = require("remote-mirror.util")
+  util.ensure_dir(util.join(config.source_root, "vendor"))
+  util.write_file(util.join(config.source_root, "main.lua"), "push\n")
+  util.write_file(util.join(config.source_root, "vendor/local.lua"), "ignore\n")
+  local transport = require("remote-mirror.transport").new(config, function()
+    error("runner should not be used")
+  end)
+  transport.remote_ignore = function()
+    return ""
+  end
+  transport.manifest = function()
+    return {
+      ["remote-only.lua"] = { size = 4 },
+      ["vendor/remote.lua"] = { size = 4 },
+    }
+  end
+  local uploaded, deleted = {}, {}
+  transport.upload = function(_, path)
+    table.insert(uploaded, path)
+  end
+  transport.delete = function(_, path)
+    table.insert(deleted, path)
+  end
+  transport:_scp_push()
+  assert_equal({ "main.lua" }, uploaded)
+  assert_equal({ "remote-only.lua" }, deleted)
+end)
+
+test("SCP review compares included files by hash", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+    transfer = "scp",
+    default_ignore = { "vendor/" },
+  })
+  local util = require("remote-mirror.util")
+  util.ensure_dir(config.source_root)
+  util.write_file(util.join(config.source_root, "same.lua"), "same\n")
+  util.write_file(util.join(config.source_root, "modified.lua"), "local\n")
+  util.write_file(util.join(config.source_root, "local-only.lua"), "local\n")
+  local transport = require("remote-mirror.transport").new(config, function()
+    error("runner should not be used")
+  end)
+  transport.remote_ignore = function()
+    return ""
+  end
+  transport.manifest = function()
+    return {
+      ["same.lua"] = { size = 5 },
+      ["modified.lua"] = { size = 7 },
+      ["remote-only.lua"] = { size = 7 },
+      ["vendor/ignored.lua"] = { size = 7 },
+    }
+  end
+  transport.hash_manifest = function()
+    return {
+      ["same.lua"] = util.hash_file(util.join(config.source_root, "same.lua")),
+      ["modified.lua"] = "remote-modified.lua",
+      ["remote-only.lua"] = "remote-remote-only.lua",
+      ["vendor/ignored.lua"] = "remote-vendor",
+    }
+  end
+  local changes = transport:_scp_changes()
+  assert_equal("local-only.lua", changes[1].path)
+  assert_equal("local_only", changes[1].kind)
+  assert_equal("modified.lua", changes[2].path)
+  assert_equal("modified", changes[2].kind)
+  assert_equal("remote-only.lua", changes[3].path)
+  assert_equal("remote_only", changes[3].kind)
+  assert_equal(3, #changes)
 end)
 
 test("does not override SSH config when user and port are unset", function()
@@ -641,6 +922,9 @@ test("persists named workspaces", function()
     user = "deploy",
     port = 65002,
     auth = "password",
+    transfer = "scp",
+    scp_command = "/opt/bin/scp",
+    scp_args = { "-O" },
     _password = "must-not-be-saved",
     remote_root = "/srv/website",
     mirror_root = "/tmp/website",
@@ -651,6 +935,9 @@ test("persists named workspaces", function()
   assert_equal("deploy", loaded.workspaces.website.user)
   assert_equal(65002, loaded.workspaces.website.port)
   assert_equal("password", loaded.workspaces.website.auth)
+  assert_equal("scp", loaded.workspaces.website.transfer)
+  assert_equal("/opt/bin/scp", loaded.workspaces.website.scp_command)
+  assert_equal({ "-O" }, loaded.workspaces.website.scp_args)
   assert(not require("remote-mirror.util").read_file(path):find("must%-not%-be%-saved"))
   assert_equal("/srv/website", loaded.workspaces.website.remote_root)
 end)

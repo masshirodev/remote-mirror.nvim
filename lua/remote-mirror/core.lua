@@ -129,7 +129,7 @@ function M:pull()
   local filter_path = util.join(self.config.state_root, "rsync-filter")
   local remote_ignore = self.transport:remote_ignore()
   util.write_file(filter_path, ignore.compile(self.config.default_ignore, remote_ignore, protected))
-  self.transport:pull(filter_path)
+  self.transport:pull(filter_path, protected)
 
   local local_after = util.walk_files(self.config.source_root)
   local protected_set = {}
@@ -230,7 +230,7 @@ function M:reconcile_plan()
   for _, change in ipairs(changes) do
     change.default_action = "pull"
     change.local_hash = local_files[change.path]
-    if change.remote_exists then
+    if change.remote_exists and change.remote_hash == nil then
       local inspected = self.transport:inspect(change.path)
       change.remote_hash = inspected and inspected.hash or nil
     end

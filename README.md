@@ -11,7 +11,7 @@ navigating a `source/` directory.
 
 - persisted named workspaces;
 - connection and workspace screens built into Neovim;
-- initial and explicit pulls through `rsync`;
+- `rsync` bulk transfer with an SCP fallback for hosts without rsync;
 - complete remote file manifest with lazy opening of ignored files;
 - automatic uploads for Neovim saves and external filesystem changes;
 - explicit push, refresh, and conflict resolution;
@@ -21,7 +21,7 @@ navigating a `source/` directory.
 
 - Neovim 0.10 or newer
 - `ssh`
-- `rsync` on both the local and remote hosts
+- either `rsync` on both hosts, or local `scp` plus an SCP/SFTP-capable SSH server
 - GNU `find`, `stat`, and `sha256sum` on the remote host
 
 SSH hosts, ports, and identities come from the user's normal SSH
@@ -35,6 +35,33 @@ With a plugin manager, an empty setup is enough:
 require("remote-mirror").setup()
 ```
 
+With [lazy.nvim](https://github.com/folke/lazy.nvim), add this plugin spec:
+
+```lua
+{
+  "masshirodev/remote-mirror.nvim",
+  lazy = false,
+  keys = {
+    {
+      "<leader>rm",
+      "<cmd>RemoteMirrorConnect<cr>",
+      desc = "Remote Mirror workspaces",
+    },
+  },
+}
+```
+
+The plugin initializes itself when loaded. To develop against a local checkout,
+replace the repository string with:
+
+```lua
+{
+  dir = "/path/to/remote-mirror.nvim",
+  name = "remote-mirror.nvim",
+  lazy = false,
+}
+```
+
 Then run:
 
 ```vim
@@ -42,7 +69,8 @@ Then run:
 ```
 
 Press `a` to add a workspace by name, SSH host, SSH port, user, authentication,
-and remote project root.
+file-transfer method, and remote project root. Use rsync when it is available;
+choose SCP when the remote host does not provide rsync.
 Workspaces are persisted in Neovim's data directory and appear on later
 connect screens.
 
@@ -52,9 +80,10 @@ confirms that summary.
 
 If `.remoteignore` is missing, the preflight offers an editable rules screen,
 continuing with built-in ignores, or cancelling. Workspaces over 100 MiB or
-10,000 files receive a stronger recommendation. The rules screen performs an
-rsync dry run and shows the estimated filtered size before it writes
-`.remoteignore` or registers the workspace.
+10,000 files receive a stronger recommendation. The rules screen shows the
+estimated filtered size before it writes `.remoteignore` or registers the
+workspace. Rsync uses a dry run; SCP calculates the estimate from the remote
+manifest.
 
 The form resolves defaults with `ssh -G`, so aliases, `Include` files, `User`,
 `Port`, and identity settings from `~/.ssh/config` are honored. A blank port or
@@ -79,11 +108,41 @@ require("remote-mirror").setup({
       host = "my-server",
       user = "deploy",
       port = 65002,
+      transfer = "scp",
       remote_root = "/srv/website",
+      scp_command = "/usr/bin/scp",
+      scp_args = { "-O" },
     },
   },
 })
 ```
+
+`transfer` defaults to `"rsync"` and can be set to `"scp"` globally or per
+workspace. SCP keeps ignore, deletion, review, and conflict semantics, but bulk
+operations transfer included files individually and are therefore slower on
+large workspaces.
+
+Executable paths and extra arguments can also be overridden globally or per
+workspace:
+
+```lua
+require("remote-mirror").setup({
+  ssh_command = "/opt/openssh/bin/ssh",
+  ssh_args = { "-o", "Compression=yes" },
+  rsync_command = "/opt/rsync/bin/rsync",
+  rsync_args = { "-az", "--partial" },
+  scp_command = "/opt/openssh/bin/scp",
+  scp_args = { "-O" },
+  remote_find_command = "/usr/local/bin/gfind",
+  remote_stat_command = "/usr/local/bin/gstat",
+  remote_sha256sum_command = "/usr/local/bin/gsha256sum",
+  remote_du_command = "/usr/local/bin/gdu",
+})
+```
+
+Remote command overrides must accept the GNU-compatible arguments used by the
+plugin. `scp_args = { "-O" }` is useful for servers that require the legacy SCP
+protocol instead of modern SFTP-backed SCP.
 
 Leave `auth` unset (or use `auth = "ssh"`) for SSH config, agent, and identity
 authentication. Password authentication is selected interactively. Passwords
@@ -96,7 +155,7 @@ exists, connecting requires one of three explicit strategies:
 
 - **Force pull (remote wins):** overwrite differing local files and delete
   files that exist only in the local mirror.
-- **Review changed paths:** compare content with rsync checksums, then open one
+- **Review changed paths:** compare file content, then open one
   editable buffer containing a `pull`, `push`, or `skip` action for every
   changed path. Applying the buffer requires confirmation.
 - **Force push (local wins):** overwrite differing remote files and delete
@@ -117,7 +176,7 @@ root so local tools resolve project-relative paths normally, but the plugin UI
 exposes the workspace name and remote-relative paths.
 
 Connection, pull, push, refresh, lazy download, and watched-file uploads run
-through a serialized asynchronous queue, so SSH and rsync do not block
+through a serialized asynchronous queue, so SSH, rsync, and SCP do not block
 Neovim's UI. SSH connection establishment defaults to a 10-second timeout and
 password authentication is limited to one prompt.
 

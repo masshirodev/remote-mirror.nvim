@@ -13,6 +13,7 @@ function M.new(config)
         user = config.user,
         port = config.port,
         auth = config.auth or "ssh",
+        transfer = config.transfer or "rsync",
         ssh_config_file = config.ssh_config_file,
         remote_root = config.remote_root,
       },
