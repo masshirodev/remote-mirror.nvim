@@ -29,6 +29,10 @@ function M.disconnect(force)
   return manager():disconnect(force)
 end
 
+function M.reset(name)
+  return manager():reset_mirror(name)
+end
+
 function M.pull()
   return manager():require_current():pull()
 end

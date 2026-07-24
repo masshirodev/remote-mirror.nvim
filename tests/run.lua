@@ -1187,6 +1187,81 @@ test("refuses to connect a workspace whose name was reused for another host", fu
   assert_equal(nil, manager.current)
 end)
 
+test("resetting a mirror clears its files and frees a reused name", function()
+  local mirror_root = vim.fn.tempname()
+  local first = require("remote-mirror.config").normalize({
+    name = "website",
+    host = "server-a",
+    remote_root = "/srv/site",
+    mirror_root = mirror_root,
+  })
+  local core = require("remote-mirror.core").new(first)
+  core:ensure_layout()
+  core.state:save()
+  require("remote-mirror.util").write_file(first.source_root .. "/index.html", "old\n")
+
+  local manager = require("remote-mirror.manager").new({
+    registry_path = vim.fn.tempname() .. "/workspaces.json",
+    workspaces = {
+      {
+        name = "website",
+        host = "server-b",
+        remote_root = "/var/www",
+        mirror_root = mirror_root,
+      },
+    },
+  })
+  assert(manager:mirror_conflict("website"))
+  assert_equal(true, manager:has_local_mirror("website"))
+
+  local result = manager:reset_mirror("website")
+  assert_equal(true, result.existed)
+  assert_equal(0, vim.fn.isdirectory(mirror_root))
+  assert_equal(nil, manager:mirror_conflict("website"))
+  assert_equal(false, manager:has_local_mirror("website"))
+  assert(manager:get("website"), "the registration must survive a reset")
+
+  local repeated = manager:reset_mirror("website")
+  assert_equal(false, repeated.existed)
+end)
+
+test("refuses to reset a connected or externally rooted mirror", function()
+  local mirror_root = vim.fn.tempname()
+  local outside_source = vim.fn.tempname()
+  local manager = require("remote-mirror.manager").new({
+    registry_path = vim.fn.tempname() .. "/workspaces.json",
+    workspaces = {
+      { name = "website", host = "server", remote_root = "/srv/site", mirror_root = mirror_root },
+      {
+        name = "external",
+        host = "server",
+        remote_root = "/srv/other",
+        mirror_root = vim.fn.tempname(),
+        source_root = outside_source,
+      },
+    },
+  })
+
+  local config = manager:workspace_options(manager:get("website"))
+  local core = require("remote-mirror.core").new(config)
+  core:ensure_layout()
+  manager:_activate(core)
+  local connected_ok, connected_err = pcall(manager.reset_mirror, manager, "website")
+  assert_equal(false, connected_ok)
+  assert(connected_err:find("disconnect", 1, true), connected_err)
+  manager:disconnect()
+  assert_equal(1, vim.fn.isdirectory(mirror_root))
+
+  require("remote-mirror.util").ensure_dir(outside_source)
+  local external_ok, external_err = pcall(manager.reset_mirror, manager, "external")
+  assert_equal(false, external_ok)
+  assert(external_err:find("source_root is outside", 1, true), external_err)
+  assert_equal(1, vim.fn.isdirectory(outside_source))
+
+  local unknown_ok = pcall(manager.reset_mirror, manager, "missing")
+  assert_equal(false, unknown_ok)
+end)
+
 test("deletes a workspace registration without touching its mirror", function()
   local registry_path = vim.fn.tempname() .. "/workspaces.json"
   local mirror_root = vim.fn.tempname()

@@ -112,6 +112,52 @@ function M:remove(name)
   self.registry:remove(name)
 end
 
+function M:mirror_path(name)
+  local workspace = assert(self.registry.workspaces[name], "remote-mirror: unknown workspace " .. name)
+  return self:workspace_options(workspace).mirror_root
+end
+
+-- Recursive deletion only ever touches the plugin-owned layout: every managed
+-- path must sit inside the mirror directory, which must not be the home
+-- directory, the filesystem root, or an ancestor of where Neovim is working.
+local function removable_mirror_root(config)
+  local root = vim.fs.normalize(config.mirror_root):gsub("/+$", "")
+  assert(root ~= "" and root ~= "/", "remote-mirror: refusing to delete the filesystem root")
+  local home = vim.fs.normalize(vim.fn.expand("~")):gsub("/+$", "")
+  assert(root ~= home, "remote-mirror: refusing to delete the home directory")
+
+  for _, key in ipairs({ "source_root", "state_root", "tree_root" }) do
+    local path = vim.fs.normalize(config[key]):gsub("/+$", "")
+    assert(
+      path:sub(1, #root + 1) == root .. "/",
+      ("remote-mirror: %s is outside %s; delete it manually"):format(key, root)
+    )
+  end
+
+  local cwd = vim.fs.normalize(vim.fn.getcwd()):gsub("/+$", "")
+  assert(
+    cwd ~= root and cwd:sub(1, #root + 1) ~= root .. "/",
+    "remote-mirror: leave the mirror directory before deleting it"
+  )
+  return root
+end
+
+function M:reset_mirror(name)
+  local workspace = assert(self.registry.workspaces[name], "remote-mirror: unknown workspace " .. name)
+  assert(
+    not self.current or self.current.config.name ~= name,
+    "remote-mirror: disconnect " .. name .. " before deleting its mirror"
+  )
+  assert(self.connecting ~= name, "remote-mirror: " .. name .. " is connecting")
+
+  local root = removable_mirror_root(self:workspace_options(workspace))
+  if vim.fn.isdirectory(root) == 0 then
+    return { path = root, existed = false }
+  end
+  assert(vim.fn.delete(root, "rf") == 0, "remote-mirror: could not delete " .. root)
+  return { path = root, existed = true }
+end
+
 function M:has_local_mirror(name)
   local workspace = assert(self.registry.workspaces[name], "remote-mirror: unknown workspace " .. name)
   local config = self:workspace_options(workspace)

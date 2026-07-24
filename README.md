@@ -114,9 +114,11 @@ If OpenSSH rejects a misowned system configuration, discovery retries with
 `~/.ssh/config` explicitly. When no user config exists, it uses `/dev/null` to
 bypass only the broken system file.
 
-Press `d` to remove a workspace registration after confirmation. Its backing
-mirror and synchronization state are preserved, so adding the same workspace
-again recovers it.
+Press `d` to delete a workspace after confirmation, choosing whether to keep
+its local mirror. Keeping it preserves the mirrored files and synchronization
+state, so adding the same workspace again recovers them. Deleting it names the
+exact directory in a second confirmation and removes it permanently; the remote
+workspace is never touched.
 
 A name identifies both the registration and the local mirror directory, so
 reusing one rebinds the registration and points the new endpoint at the
@@ -127,9 +129,10 @@ Each mirror also records the host and remote path it was built from. When a
 name ends up pointing somewhere else, connecting is refused and names the
 mirror directory involved, because that mirror's files and recorded hashes
 describe the previous endpoint; a force push would otherwise upload one
-server's project into another. Rename the workspace or delete the reported
-directory. Mirrors created before this was recorded are adopted by whichever
-workspace uses them.
+server's project into another. Rename the workspace, or run
+`:RemoteMirrorReset {workspace}` to delete that mirror and start the name over
+against the new endpoint. Mirrors created before this was recorded are adopted
+by whichever workspace uses them.
 
 Workspaces can also be declared:
 
@@ -233,12 +236,23 @@ it.
 | --- | --- |
 | `:RemoteMirrorConnect` | Open the workspace connection screen |
 | `:RemoteMirrorDisconnect` | Leave the active workspace, keeping its mirror |
+| `:RemoteMirrorReset {workspace}` | Delete a local mirror, keeping its registration |
 | `:RemoteMirrorPull` | Pull while protecting locally changed files |
 | `:RemoteMirrorPush` | Push locally changed, created, and deleted files |
 | `:RemoteMirrorRefresh` | Compare the remote manifest without transferring |
 | `:RemoteMirrorConflicts` | Display recorded conflicts |
 | `:RemoteMirrorResolve {path} pull` | Replace the local file with the remote version |
 | `:RemoteMirrorResolve {path} push` | Explicitly overwrite the remote version |
+
+## Deleting a local mirror
+
+`:RemoteMirrorReset {workspace}` deletes a workspace's mirror directory while
+keeping its registration, so the next connection starts from the remote
+workspace again. It completes registered workspace names, and it refuses to run
+against a connected workspace, from inside the mirror itself, or when
+`source_root`, `state_root`, or `tree_root` was configured outside the mirror
+directory. Those paths are removed manually, because the plugin only deletes
+the layout it owns.
 
 ## Disconnecting
 

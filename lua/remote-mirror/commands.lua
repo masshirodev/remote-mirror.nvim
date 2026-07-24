@@ -26,6 +26,7 @@ function M.register(manager)
   local command_names = {
     "RemoteMirrorConnect",
     "RemoteMirrorDisconnect",
+    "RemoteMirrorReset",
     "RemoteMirrorPull",
     "RemoteMirrorPush",
     "RemoteMirrorRefresh",
@@ -53,6 +54,28 @@ function M.register(manager)
   end), {
     bang = true,
     desc = "Disconnect the active remote workspace, keeping its mirror on disk",
+  })
+
+  vim.api.nvim_create_user_command("RemoteMirrorReset", safely(function(options)
+    local name = vim.trim(options.args)
+    local result = manager:reset_mirror(name)
+    if not result.existed then
+      util.notify(("%s has no local mirror at %s"):format(name, result.path))
+      return
+    end
+    util.notify(("deleted the local mirror at %s"):format(result.path), vim.log.levels.WARN)
+  end), {
+    nargs = 1,
+    complete = function(lead)
+      local names = {}
+      for _, workspace in ipairs(manager:list()) do
+        if workspace.name:sub(1, #lead) == lead then
+          table.insert(names, workspace.name)
+        end
+      end
+      return names
+    end,
+    desc = "Delete a workspace's local mirror, keeping its registration",
   })
 
   vim.api.nvim_create_user_command("RemoteMirrorPull", safely(function()

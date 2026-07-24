@@ -665,22 +665,50 @@ function M.open(manager)
     if not workspace then
       return
     end
-    vim.ui.select({
-      "Remove registration",
-      "Cancel",
-    }, {
-      prompt = ("Delete workspace %s? Mirror files will be preserved."):format(workspace.name),
+    local keep = "Remove registration, keep the local mirror"
+    local purge = "Remove registration and delete the local mirror"
+    vim.ui.select({ keep, purge, "Cancel" }, {
+      prompt = ("Delete workspace %s?"):format(workspace.name),
     }, function(choice)
-      if choice ~= "Remove registration" then
+      if choice ~= keep and choice ~= purge then
         return
       end
-      local ok, err = pcall(manager.remove, manager, workspace.name)
+
+      local function unregister()
+        local ok, err = pcall(manager.remove, manager, workspace.name)
+        if not ok then
+          util.notify(err, vim.log.levels.ERROR)
+          return
+        end
+        util.notify("deleted workspace registration " .. workspace.name)
+        reopen()
+      end
+
+      if choice == keep then
+        unregister()
+        return
+      end
+
+      local ok, mirror_root = pcall(manager.mirror_path, manager, workspace.name)
       if not ok then
-        util.notify(err, vim.log.levels.ERROR)
+        util.notify(mirror_root, vim.log.levels.ERROR)
         return
       end
-      util.notify("deleted workspace registration " .. workspace.name)
-      reopen()
+      confirm(
+        ("Permanently delete %s and every local file in it?"):format(mirror_root),
+        "Delete the mirror",
+        function()
+          local reset_ok, result = pcall(manager.reset_mirror, manager, workspace.name)
+          if not reset_ok then
+            util.notify(result, vim.log.levels.ERROR)
+            return
+          end
+          if result.existed then
+            util.notify("deleted the local mirror at " .. result.path, vim.log.levels.WARN)
+          end
+          unregister()
+        end
+      )
     end)
   end, { buffer = buffer, nowait = true })
   vim.keymap.set("n", "r", reopen, { buffer = buffer, nowait = true })
