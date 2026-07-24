@@ -92,13 +92,16 @@ full path is still possible with `i`.
 | `r` | List the current directory again |
 | `q` | Cancel and return to the connection screen |
 
-`e` edits the `.remoteignore` belonging to the directory on screen, which is
-useful while the listing shows which directories are worth excluding. Saving
-writes that file on the remote host and returns to the browser in the same
-directory, so a root selected afterwards is inspected with the rules already in
-place. Nothing about the workspace is decided there, and abandoning the browser
-leaves a written `.remoteignore` behind, because it belongs to the remote
-project rather than to the registration.
+`e` drafts the workspace's ignore rules while the listing still shows which
+directories are worth excluding. The rules are held in memory: saving returns to
+the browser in the same directory without touching the remote host, and they are
+written once `.` chooses a project root, to that root. Abandoning the browser
+with `q` leaves nothing behind.
+
+A draft is seeded from the `.remoteignore` of the directory that was on screen
+when `e` was first pressed, or from the built-in defaults when that directory
+has none. After that the draft is kept as edited, so navigating elsewhere never
+discards rules that were never written anywhere.
 
 Listings are read over the same SSH connection the workspace will use, so an
 unreachable host, a wrong password, or an unreadable directory is reported
@@ -371,7 +374,13 @@ Ignored paths stay in the workspace manifest and download lazily when opened.
 added: press `e` while browsing for a project root, or `i` on a registered
 workspace in the connection screen. Both open the same editor, seeded with the
 existing file when there is one and with the built-in defaults when there is
-not. `<leader>s` or `Ctrl-S` writes it; `q` leaves without writing.
+not, and both discard the edit on `q`.
+
+Saving differs because only one of them knows where the file belongs. A
+registered workspace has a root already, so `<leader>s` or `Ctrl-S` writes
+`.remoteignore` to it immediately. While browsing there is no root yet, so
+saving keeps the rules for the workspace being created and they are written when
+one is chosen.
 
 The editor's own instructions are the lines beginning `# remote-mirror:`, and
 they are stripped before the file is written, so editing the same file

@@ -181,7 +181,7 @@ end
 local browser_header_lines = 3
 
 -- Guidance is written into the buffer so the keys are visible while editing,
--- but it is stripped before the file is written. Without a marker the header
+-- but it is stripped before the rules are used. Without a marker the header
 -- would be saved and then re-added on the next edit, growing every round trip.
 local guidance_prefix = "# remote-mirror:"
 
@@ -204,10 +204,50 @@ local function ignore_file_contents(buffer)
   return #kept > 0 and (table.concat(kept, "\n") .. "\n") or ""
 end
 
--- Editing from the browser targets the directory on screen rather than a
--- registered workspace, so the file is written back where it was read and the
--- browser reopens there. Nothing about the workspace is decided here.
-local function open_browser_ignore_editor(manager, workspace, password, path, on_close)
+-- Saving means different things depending on where the editor was opened from,
+-- so the caller decides: browsing holds the rules until a root is chosen, while
+-- a registered workspace already has one and writes through to it.
+local function open_ignore_rules_editor(options)
+  local lines = {
+    ("%s .remoteignore for %s"):format(guidance_prefix, options.path),
+    ("%s gitignore-style patterns, one per line; these comments are not saved."):format(guidance_prefix),
+    ("%s <leader>s or Ctrl-S %s, q discards them."):format(guidance_prefix, options.save_hint),
+    "",
+  }
+  if options.seed and options.seed ~= "" then
+    vim.list_extend(lines, vim.split((options.seed:gsub("\n+$", "")), "\n", { plain = true }))
+  else
+    vim.list_extend(lines, options.defaults)
+  end
+
+  local buffer = open_screen("remote-mirror://ignore-edit/" .. options.name, "gitignore")
+  vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
+  vim.api.nvim_set_current_buf(buffer)
+  vim.api.nvim_win_set_cursor(0, { math.min(5, #lines), 0 })
+
+  local function save()
+    options.on_save(ignore_file_contents(buffer))
+  end
+
+  vim.keymap.set("n", "<leader>s", save, { buffer = buffer, nowait = true })
+  vim.keymap.set("n", "<C-s>", save, { buffer = buffer, nowait = true })
+  vim.keymap.set("i", "<C-s>", function()
+    vim.cmd.stopinsert()
+    save()
+  end, { buffer = buffer, nowait = true })
+  vim.keymap.set("n", "q", options.on_close, { buffer = buffer, nowait = true })
+  return buffer
+end
+
+local function ignore_defaults(manager, workspace, path)
+  return manager:workspace_options(vim.tbl_extend("force", workspace, { remote_root = path })).default_ignore
+end
+
+-- A registered workspace has a root already, so its rules are read from it and
+-- written straight back to it.
+local function edit_workspace_ignore(manager, workspace, on_close)
+  local password = manager.credentials[workspace.name]
+  local path = workspace.remote_root
   util.notify("reading " .. path .. "/.remoteignore")
   manager:remote_ignore_at_async(workspace, password, path, function(ok, info)
     if not ok then
@@ -215,49 +255,25 @@ local function open_browser_ignore_editor(manager, workspace, password, path, on
       on_close()
       return
     end
-
-    local lines = {
-      ("%s .remoteignore for %s"):format(guidance_prefix, path),
-      ("%s gitignore-style patterns, one per line; these comments are not saved."):format(guidance_prefix),
-      ("%s <leader>s or Ctrl-S writes the file, q goes back to browsing."):format(guidance_prefix),
-      "",
-    }
-    if info.exists then
-      vim.list_extend(lines, vim.split((info.contents:gsub("\n+$", "")), "\n", { plain = true }))
-    else
-      local options = manager:workspace_options(
-        vim.tbl_extend("force", workspace, { remote_root = path })
-      )
-      vim.list_extend(lines, options.default_ignore)
-    end
-
-    local buffer = open_screen("remote-mirror://ignore-edit/" .. workspace.name, "gitignore")
-    vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
-    vim.api.nvim_set_current_buf(buffer)
-    vim.api.nvim_win_set_cursor(0, { math.min(5, #lines), 0 })
-
-    local function write()
-      local contents = ignore_file_contents(buffer)
-      util.notify("writing " .. path .. "/.remoteignore")
-      manager:write_remote_ignore_at_async(workspace, password, path, contents, function(write_ok, err)
-        if not write_ok then
-          util.notify(err, vim.log.levels.ERROR)
-          return
-        end
-        util.notify("wrote " .. path .. "/.remoteignore")
-        on_close()
-      end)
-    end
-
-    vim.keymap.set("n", "<leader>s", write, { buffer = buffer, nowait = true })
-    vim.keymap.set("n", "<C-s>", write, { buffer = buffer, nowait = true })
-    vim.keymap.set("i", "<C-s>", function()
-      vim.cmd.stopinsert()
-      write()
-    end, { buffer = buffer, nowait = true })
-    vim.keymap.set("n", "q", function()
-      on_close()
-    end, { buffer = buffer, nowait = true })
+    open_ignore_rules_editor({
+      name = workspace.name,
+      path = path,
+      seed = info.exists and info.contents or nil,
+      defaults = ignore_defaults(manager, workspace, path),
+      save_hint = "writes .remoteignore",
+      on_save = function(contents)
+        util.notify("writing " .. path .. "/.remoteignore")
+        manager:write_remote_ignore_at_async(workspace, password, path, contents, function(write_ok, err)
+          if not write_ok then
+            util.notify(err, vim.log.levels.ERROR)
+            return
+          end
+          util.notify("wrote " .. path .. "/.remoteignore")
+          on_close()
+        end)
+      end,
+      on_close = on_close,
+    })
   end)
 end
 
@@ -268,7 +284,9 @@ local function join_remote(directory, name)
   return directory .. "/" .. name
 end
 
-local function open_remote_browser(manager, workspace, password, on_select, on_cancel, start_path)
+-- `rules` outlives each browser buffer, because the screen is rebuilt whenever
+-- the editor hands control back and the draft must survive that.
+local function open_remote_browser(manager, workspace, password, on_select, on_cancel, rules, start_path)
   local buffer = open_screen("remote-mirror://browse/" .. workspace.name, "remote-mirror-browser")
   vim.api.nvim_set_current_buf(buffer)
 
@@ -390,8 +408,40 @@ local function open_remote_browser(manager, workspace, password, on_select, on_c
       return
     end
     local path = state.path
-    open_browser_ignore_editor(manager, workspace, password, path, function()
-      open_remote_browser(manager, workspace, password, on_select, on_cancel, path)
+    local function back()
+      open_remote_browser(manager, workspace, password, on_select, on_cancel, rules, path)
+    end
+
+    local function edit(seed)
+      open_ignore_rules_editor({
+        name = workspace.name,
+        path = path,
+        seed = seed,
+        defaults = ignore_defaults(manager, workspace, path),
+        save_hint = "keeps these rules for the workspace",
+        on_save = function(contents)
+          rules.contents = contents
+          util.notify("rules kept; they are written when a project root is chosen")
+          back()
+        end,
+        on_close = back,
+      })
+    end
+
+    -- A draft already carries edits that were never written anywhere, so it
+    -- wins over whatever this directory happens to hold.
+    if rules.contents then
+      edit(rules.contents)
+      return
+    end
+    util.notify("reading " .. path .. "/.remoteignore")
+    manager:remote_ignore_at_async(workspace, password, path, function(ok, info)
+      if not ok then
+        util.notify(info, vim.log.levels.ERROR)
+        back()
+        return
+      end
+      edit(info.exists and info.contents or nil)
     end)
   end)
   map("H", function()
@@ -445,12 +495,19 @@ local function add_workspace(manager, reopen)
     prompt("SSH host or alias: ", function(host)
       prompt_connection(manager, { host = host }, function(connection, password)
         local base = vim.tbl_extend("force", connection, { name = name, host = host })
+        local rules = {}
         open_remote_browser(manager, base, password, function(remote_root)
           local definition = vim.tbl_extend("force", base, { remote_root = remote_root })
           util.notify("inspecting remote workspace")
           manager:inspect_workspace_async(definition, password, function(inspect_ok, stats)
             if not inspect_ok then
               util.notify(stats, vim.log.levels.ERROR)
+              return
+            end
+            -- Rules drafted while browsing belong to whichever root was chosen,
+            -- so they are written there instead of any directory passed through.
+            if rules.contents then
+              confirm_estimate(manager, definition, password, rules.contents, true, reopen)
               return
             end
             if stats.remote_ignore.exists then
@@ -485,7 +542,7 @@ local function add_workspace(manager, reopen)
               end
             end)
           end)
-        end, reopen)
+        end, reopen, rules)
       end)
     end)
   end)
@@ -760,13 +817,7 @@ function M.open(manager)
     if not workspace then
       return
     end
-    open_browser_ignore_editor(
-      manager,
-      workspace,
-      manager.credentials[workspace.name],
-      workspace.remote_root,
-      reopen
-    )
+    edit_workspace_ignore(manager, workspace, reopen)
   end, { buffer = buffer, nowait = true })
   vim.keymap.set("n", "d", function()
     local index = vim.api.nvim_win_get_cursor(0)[1] - 4
@@ -832,7 +883,7 @@ local status_markers = {
   clean = " ",
 }
 
-M._open_browser_ignore_editor = open_browser_ignore_editor
+M._edit_workspace_ignore = edit_workspace_ignore
 M._open_remote_browser = open_remote_browser
 
 function M.open_workspace(manager, core)

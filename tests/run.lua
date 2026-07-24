@@ -1798,26 +1798,27 @@ local function ignore_editor_fixture(existing)
   return manager, written
 end
 
-test("editing rules from the browser seeds defaults and writes without guidance", function()
+local function save_editor()
+  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-s>", true, false, true), "x", false)
+end
+
+test("editing a registered workspace's rules writes them without guidance", function()
   local manager, written = ignore_editor_fixture(nil)
   local closed = false
-  require("remote-mirror.ui")._open_browser_ignore_editor(
+  require("remote-mirror.ui")._edit_workspace_ignore(
     manager,
-    { name = "website", host = "server" },
-    nil,
-    "/srv/website",
+    { name = "website", host = "server", remote_root = "/srv/website" },
     function()
       closed = true
     end
   )
 
-  local buffer = vim.api.nvim_get_current_buf()
-  local lines = vim.api.nvim_buf_get_lines(buffer, 0, -1, false)
+  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
   -- Guidance is visible while editing but must never reach the file.
   assert_equal(true, lines[1]:find("remote-mirror:", 1, true) ~= nil)
   assert_contains(lines, "node_modules/")
 
-  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-s>", true, false, true), "x", false)
+  save_editor()
   assert_equal("/srv/website", written.path)
   assert_equal(true, closed)
   for _, line in ipairs(vim.split(written.contents, "\n", { plain = true })) do
@@ -1833,17 +1834,73 @@ end)
 test("editing existing rules round-trips their own comments", function()
   local existing = "# my own note\nstorage/\n!storage/keep.txt\n"
   local manager, written = ignore_editor_fixture(existing)
-  require("remote-mirror.ui")._open_browser_ignore_editor(
+  require("remote-mirror.ui")._edit_workspace_ignore(
     manager,
-    { name = "website", host = "server" },
-    nil,
-    "/srv/website",
+    { name = "website", host = "server", remote_root = "/srv/website" },
     function() end
   )
 
-  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-s>", true, false, true), "x", false)
+  save_editor()
   -- A second round trip must produce the same file, not a growing header.
   assert_equal(existing, written.contents)
+  vim.cmd("bwipeout!")
+end)
+
+test("rules drafted while browsing are not written to the directory on screen", function()
+  local manager, written = ignore_editor_fixture(nil)
+  manager.browse_remote_async = function(_, _, _, path, callback)
+    callback(true, { path = path or "/home/deploy", entries = {} })
+  end
+
+  local rules = {}
+  local selected
+  local ui = require("remote-mirror.ui")
+  ui._open_remote_browser(manager, { name = "website", host = "server" }, nil, function(root)
+    selected = root
+  end, function() end, rules, "/home/deploy/other")
+
+  local function feed(keys)
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(keys, true, false, true), "x", false)
+  end
+
+  feed("e")
+  vim.api.nvim_buf_set_lines(0, -1, -1, false, { "storage/" })
+  save_editor()
+
+  -- Browsing must not touch the remote; the draft is held until a root is
+  -- chosen, and then it belongs to that root rather than to this directory.
+  assert_equal(nil, written.path)
+  assert_contains(vim.split(rules.contents, "\n", { plain = true }), "storage/")
+
+  feed(".")
+  assert_equal("/home/deploy/other", selected)
+  vim.cmd("bwipeout!")
+end)
+
+test("a draft outlives navigation and reseeds the editor", function()
+  local manager = ignore_editor_fixture("from the remote\n")
+  manager.browse_remote_async = function(_, _, _, path, callback)
+    callback(true, { path = path or "/home/deploy", entries = {} })
+  end
+
+  local rules = { contents = "drafted/\n" }
+  require("remote-mirror.ui")._open_remote_browser(
+    manager,
+    { name = "website", host = "server" },
+    nil,
+    function() end,
+    function() end,
+    rules,
+    "/home/deploy"
+  )
+  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("e", true, false, true), "x", false)
+
+  -- Unwritten edits win over whatever the directory being browsed holds.
+  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+  assert_contains(lines, "drafted/")
+  for _, line in ipairs(lines) do
+    assert(line ~= "from the remote", "the draft was replaced by the remote file")
+  end
   vim.cmd("bwipeout!")
 end)
 
