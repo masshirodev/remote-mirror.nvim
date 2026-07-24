@@ -119,6 +119,30 @@ function M.is_ignored(path, defaults, remote_contents)
   return ignored
 end
 
+M.suggestion_minimum_bytes = 10 * 1024 * 1024
+M.suggestion_limit = 8
+
+-- Ranks the heaviest directories the current rules would still mirror, so the
+-- ignore screen can offer them instead of only listing built-in defaults.
+function M.suggest(directories, defaults, remote_contents, minimum)
+  minimum = minimum or M.suggestion_minimum_bytes
+  local suggestions = {}
+
+  for _, entry in ipairs(directories or {}) do
+    local covered = M.is_ignored(entry.path, defaults, remote_contents)
+    for _, suggestion in ipairs(suggestions) do
+      covered = covered or entry.path:sub(1, #suggestion.path + 1) == suggestion.path .. "/"
+    end
+    if not covered and entry.size >= minimum then
+      table.insert(suggestions, { path = entry.path, size = entry.size })
+      if #suggestions >= M.suggestion_limit then
+        break
+      end
+    end
+  end
+  return suggestions
+end
+
 function M.compile(defaults, remote_contents, protected)
   local includes = {}
   local excludes = {}

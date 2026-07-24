@@ -25,6 +25,10 @@ function M.connect(name)
   return manager():connect(name)
 end
 
+function M.disconnect(force)
+  return manager():disconnect(force)
+end
+
 function M.pull()
   return manager():require_current():pull()
 end

@@ -150,6 +150,49 @@ cd %s
   return manifest
 end
 
+-- Browsing happens before a project root is chosen, so the path is passed in
+-- instead of being read from the configured remote root.
+function M:list_directory(path)
+  local target = (path == nil or path == "") and '"$HOME"' or util.shell_quote(path)
+  local command = ([[
+set -eu
+cd %s
+pwd
+%s -L . -mindepth 1 -maxdepth 1 -printf '%%y\t%%f\n' 2>/dev/null || true
+]]):format(target, util.shell_quote(self.config.remote_find_command))
+  local result = self:ssh(command)
+
+  local root
+  local entries = {}
+  for line in result.stdout:gmatch("[^\r\n]+") do
+    if not root then
+      root = line
+    else
+      local kind, name = line:match("^(%a)\t(.+)$")
+      if kind then
+        table.insert(entries, {
+          name = name,
+          kind = kind == "d" and "directory" or "file",
+        })
+      end
+    end
+  end
+  assert(
+    root and root:sub(1, 1) == "/",
+    "remote-mirror: could not read the remote directory listing"
+  )
+
+  table.sort(entries, function(left, right)
+    if left.kind ~= right.kind then
+      return left.kind == "directory"
+    end
+    return left.name < right.name
+  end)
+
+  root = root:gsub("/+$", "")
+  return { path = root ~= "" and root or "/", entries = entries }
+end
+
 function M:inspect(path)
   local absolute = self.config.remote_root .. "/" .. path
   local quoted = util.shell_quote(absolute)
@@ -281,25 +324,51 @@ function M:estimate(filter_path, remote_contents)
   }
 end
 
+-- One traversal reports the total, the file count, and the per-directory sizes
+-- used to suggest ignore rules, because `du` already walks the whole tree.
 function M:workspace_stats()
   local root = util.shell_quote(self.config.remote_root)
   local command = ([[
 set -eu
 cd %s
-size=$(%s -sb . | awk '{print $1}')
-files=$(%s . -type f | wc -l)
-printf "%%s\t%%s\n" "$size" "$files"
+%s . -type f | wc -l
+%s -b --max-depth=2 . 2>/dev/null || true
 ]]):format(
     root,
-    util.shell_quote(self.config.remote_du_command),
-    util.shell_quote(self.config.remote_find_command)
+    util.shell_quote(self.config.remote_find_command),
+    util.shell_quote(self.config.remote_du_command)
   )
   local result = self:ssh(command)
-  local size, files = result.stdout:match("^(%d+)\t%s*(%d+)")
-  assert(size and files, "remote-mirror: could not read remote workspace size")
+
+  local files, size
+  local directories = {}
+  for line in result.stdout:gmatch("[^\r\n]+") do
+    if files == nil then
+      files = tonumber(vim.trim(line))
+    else
+      local bytes, path = line:match("^(%d+)%s+(.+)$")
+      if bytes then
+        path = path:gsub("^%./", ""):gsub("/+$", "")
+        if path == "." or path == "" then
+          size = tonumber(bytes)
+        else
+          table.insert(directories, { path = path, size = tonumber(bytes) })
+        end
+      end
+    end
+  end
+  assert(files and size, "remote-mirror: could not read remote workspace size")
+
+  table.sort(directories, function(left, right)
+    if left.size ~= right.size then
+      return left.size > right.size
+    end
+    return left.path < right.path
+  end)
   return {
-    size = tonumber(size),
-    files = tonumber(files),
+    size = size,
+    files = files,
+    directories = directories,
   }
 end
 

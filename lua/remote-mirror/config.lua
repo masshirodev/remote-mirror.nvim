@@ -66,7 +66,9 @@ function M.normalize(options)
   if options.user ~= nil then
     assert(
       type(options.user) == "string" and options.user:match("^[%w._-]+$"),
-      "remote-mirror: user contains unsupported characters"
+      ("remote-mirror: user contains unsupported characters: %s; use the login name only, without a host"):format(
+        vim.inspect(options.user)
+      )
     )
   end
   if options.ssh_config_file ~= nil then

@@ -11,10 +11,11 @@ navigating a `source/` directory.
 
 - persisted named workspaces;
 - connection and workspace screens built into Neovim;
+- interactive browsing of the remote host when choosing a project root;
 - `rsync` bulk transfer with an SCP fallback for hosts without rsync;
 - complete remote file manifest with lazy opening of ignored files;
 - automatic uploads for Neovim saves and external filesystem changes;
-- explicit push, refresh, and conflict resolution;
+- explicit push, refresh, disconnect, and conflict resolution;
 - hash checks that prevent silent remote overwrites.
 
 ## Requirements
@@ -22,7 +23,7 @@ navigating a `source/` directory.
 - Neovim 0.10 or newer
 - `ssh`
 - either `rsync` on both hosts, or local `scp` plus an SCP/SFTP-capable SSH server
-- GNU `find`, `stat`, and `sha256sum` on the remote host
+- GNU `find`, `stat`, `sha256sum`, and `du` on the remote host
 
 SSH hosts, ports, and identities come from the user's normal SSH
 configuration.
@@ -69,12 +70,31 @@ Then run:
 ```
 
 Press `a` to add a workspace by name, SSH host, SSH port, user, authentication,
-file-transfer method, and remote project root. Use rsync when it is available;
+and file-transfer method, then pick the remote project root by browsing the
+host or by typing a path. Use rsync when it is available;
 choose SCP when the remote host does not provide rsync.
 Workspaces are persisted in Neovim's data directory and appear on later
 connect screens.
 
-After the remote path is entered, the plugin validates it and displays its
+The remote project root is chosen on a browser screen that lists the remote
+host's directories and files, starting in the login home directory. Typing a
+full path is still possible with `i`.
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Open the directory under the cursor |
+| `-` | Go to the parent directory |
+| `.` | Use the current directory as the project root |
+| `i` | Type a remote path and go there |
+| `H` | Show or hide dotfiles |
+| `r` | List the current directory again |
+| `q` | Cancel and return to the connection screen |
+
+Listings are read over the same SSH connection the workspace will use, so an
+unreachable host, a wrong password, or an unreadable directory is reported
+before the workspace is registered.
+
+After the remote path is chosen, the plugin validates it and displays its
 total size and file count. The workspace is registered only after the user
 confirms that summary.
 
@@ -199,12 +219,28 @@ it.
 | Command | Purpose |
 | --- | --- |
 | `:RemoteMirrorConnect` | Open the workspace connection screen |
+| `:RemoteMirrorDisconnect` | Leave the active workspace, keeping its mirror |
 | `:RemoteMirrorPull` | Pull while protecting locally changed files |
 | `:RemoteMirrorPush` | Push locally changed, created, and deleted files |
 | `:RemoteMirrorRefresh` | Compare the remote manifest without transferring |
 | `:RemoteMirrorConflicts` | Display recorded conflicts |
 | `:RemoteMirrorResolve {path} pull` | Replace the local file with the remote version |
 | `:RemoteMirrorResolve {path} push` | Explicitly overwrite the remote version |
+
+## Disconnecting
+
+`:RemoteMirrorDisconnect` stops watching the active workspace, stops uploading
+saves, and restores the working directory that was current before connecting.
+The local mirror, its synchronization state, and any open buffers are left
+alone, so reconnecting later reconciles from that mirror instead of pulling
+everything again. The session password is also kept, so a reconnect within the
+same session does not prompt for it.
+
+The command refuses to run while a pull, push, refresh, or upload is still in
+flight, so a transfer is never abandoned halfway. Use
+`:RemoteMirrorDisconnect!` to leave anyway; queued operations are cancelled and
+debounced uploads that had not started yet are discarded, which is reported in
+the confirmation message. An operation that is already running still finishes.
 
 ## Local file watching
 
@@ -229,6 +265,24 @@ target/
 ```
 
 Ignored paths stay in the workspace manifest and download lazily when opened.
+
+The preflight measures every directory while it sizes the workspace, so the
+rules screen also lists the heaviest directories that neither the built-in
+defaults nor an existing rule already covers:
+
+```gitignore
+# Largest directories the rules above do not cover:
+#    512.0 MiB  storage/
+#    331.0 MiB  public/uploads/
+#
+# Uncomment any of these to keep that directory on the server.
+# storage/
+# public/uploads/
+```
+
+Suggestions arrive commented out, so nothing is excluded without an explicit
+edit. A directory is suggested when it holds at least 10 MiB, up to eight of
+them, and a directory is skipped when one of its parents is already listed.
 
 ## Conflict behavior
 

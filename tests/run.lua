@@ -41,6 +41,26 @@ test("normalizes configuration and workspace paths", function()
   assert_equal(true, config.upload_on_save)
 end)
 
+test("reports the rejected value when a user is unusable", function()
+  local ok, err = pcall(require("remote-mirror.config").normalize, {
+    host = "server",
+    user = "u914019733@server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+  })
+  assert_equal(false, ok)
+  assert(err:find('"u914019733@server"', 1, true), err)
+
+  local trailing_ok, trailing_err = pcall(require("remote-mirror.config").normalize, {
+    host = "server",
+    user = "u914019733 ",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+  })
+  assert_equal(false, trailing_ok)
+  assert(trailing_err:find('"u914019733 "', 1, true), trailing_err)
+end)
+
 test("normalizes a workspace-specific SSH port", function()
   local config = require("remote-mirror.config").normalize({
     host = "server",
@@ -272,13 +292,136 @@ test("reads remote workspace size and file count", function()
   local runner = function()
     return {
       code = 0,
-      stdout = "1610612736\t35369\n",
+      stdout = table.concat({
+        "35369",
+        "104857600\t./storage/logs",
+        "209715200\t./storage",
+        "52428800\t./node_modules",
+        "1610612736\t.",
+      }, "\n") .. "\n",
       stderr = "",
     }
   end
   local stats = require("remote-mirror.transport").new(config, runner):workspace_stats()
   assert_equal(1610612736, stats.size)
   assert_equal(35369, stats.files)
+  assert_equal({
+    { path = "storage", size = 209715200 },
+    { path = "storage/logs", size = 104857600 },
+    { path = "node_modules", size = 52428800 },
+  }, stats.directories)
+end)
+
+test("suggests heavy directories that the current rules still mirror", function()
+  local Ignore = require("remote-mirror.ignore")
+  local directories = {
+    { path = "node_modules", size = 400 * 1024 * 1024 },
+    { path = "storage", size = 300 * 1024 * 1024 },
+    { path = "storage/logs", size = 290 * 1024 * 1024 },
+    { path = "public/uploads", size = 40 * 1024 * 1024 },
+    { path = "src", size = 2 * 1024 * 1024 },
+  }
+  local suggestions = Ignore.suggest(directories, { "node_modules/", "*.log" }, "")
+  assert_equal({
+    { path = "storage", size = 300 * 1024 * 1024 },
+    { path = "public/uploads", size = 40 * 1024 * 1024 },
+  }, suggestions)
+
+  local with_remote = Ignore.suggest(directories, { "node_modules/" }, "storage/\n")
+  assert_equal({ { path = "public/uploads", size = 40 * 1024 * 1024 } }, with_remote)
+  assert_equal({}, Ignore.suggest(nil, {}, ""))
+end)
+
+test("lists a remote directory with folders before files", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+  })
+  local captured
+  local runner = function(command)
+    captured = command[#command]
+    return {
+      code = 0,
+      stdout = table.concat({
+        "/srv/apps",
+        "f\tREADME.md",
+        "d\twebsite",
+        "f\t.env",
+        "d\t.config",
+      }, "\n") .. "\n",
+      stderr = "",
+    }
+  end
+  local listing = require("remote-mirror.transport").new(config, runner):list_directory("/srv/apps/")
+  assert(captured:find("cd '/srv/apps/'", 1, true))
+  assert_equal("/srv/apps", listing.path)
+  assert_equal({
+    { name = ".config", kind = "directory" },
+    { name = "website", kind = "directory" },
+    { name = ".env", kind = "file" },
+    { name = "README.md", kind = "file" },
+  }, listing.entries)
+end)
+
+test("lists the remote home directory when no path is given", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+  })
+  local captured
+  local runner = function(command)
+    captured = command[#command]
+    return { code = 0, stdout = "/home/deploy\n", stderr = "" }
+  end
+  local listing = require("remote-mirror.transport").new(config, runner):list_directory(nil)
+  assert(captured:find('cd "$HOME"', 1, true))
+  assert_equal("/home/deploy", listing.path)
+  assert_equal({}, listing.entries)
+end)
+
+test("rejects an unreadable remote directory listing", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+  })
+  local runner = function()
+    return { code = 0, stdout = "", stderr = "" }
+  end
+  local ok = pcall(function()
+    require("remote-mirror.transport").new(config, runner):list_directory("/srv")
+  end)
+  assert_equal(false, ok)
+end)
+
+test("browses a remote host before a project root is chosen", function()
+  local script = vim.fn.tempname()
+  local file = assert(io.open(script, "w"))
+  file:write("#!/bin/sh\nprintf '/srv\\nd\\twebsite\\nf\\tnotes.txt\\n'\n")
+  file:close()
+  assert(vim.uv.fs_chmod(script, 493))
+
+  local manager = require("remote-mirror.manager").new({
+    registry_path = vim.fn.tempname() .. "/workspaces.json",
+    mirror_root = vim.fn.tempname(),
+    ssh_command = script,
+  })
+  local completed, listing
+  manager:browse_remote_async({ name = "website", host = "server" }, nil, "/srv", function(ok, result)
+    assert_equal(true, ok)
+    listing = result
+    completed = true
+  end)
+  assert(vim.wait(2000, function()
+    return completed
+  end))
+  assert_equal("/srv", listing.path)
+  assert_equal({
+    { name = "website", kind = "directory" },
+    { name = "notes.txt", kind = "file" },
+  }, listing.entries)
 end)
 
 test("detects an existing remote ignore file", function()
@@ -981,6 +1124,118 @@ test("deletes a workspace registration without touching its mirror", function()
   assert_equal(nil, manager.registry.workspaces.website)
   assert_equal(false, manager:has_password("website"))
   assert_equal(true, util.is_file(util.join(mirror_root, "kept.txt")))
+end)
+
+test("disconnecting stops watching and restores the previous directory", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+  })
+  local core = require("remote-mirror.core").new(config)
+  core:ensure_layout()
+  local manager = require("remote-mirror.manager").new({
+    registry_path = vim.fn.tempname() .. "/workspaces.json",
+  })
+
+  local previous = vim.fn.getcwd()
+  manager:_activate(core)
+  assert_equal("source", vim.fn.fnamemodify(vim.fn.getcwd(), ":t"))
+  assert(core.watcher)
+
+  local result = manager:disconnect()
+  assert_equal("example", result.name)
+  assert_equal(0, result.pending)
+  assert_equal(nil, manager.current)
+  assert_equal(nil, core.watcher)
+  assert_equal(true, core.detached)
+  assert_equal(previous, vim.fn.getcwd())
+end)
+
+test("refuses to disconnect while an operation is running", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+    watch = false,
+  })
+  local core = require("remote-mirror.core").new(config)
+  core:ensure_layout()
+  local manager = require("remote-mirror.manager").new({
+    registry_path = vim.fn.tempname() .. "/workspaces.json",
+  })
+  manager:_activate(core)
+
+  local finished, queued_error = false, nil
+  core:enqueue(function()
+    require("remote-mirror.async").runner({ "sh", "-c", "sleep 0.2" })
+  end, function()
+    finished = true
+  end)
+  core:enqueue(function()
+    error("remote-mirror: this queued operation must never run")
+  end, function(ok, err)
+    queued_error = not ok and err or nil
+  end)
+
+  local refused, message = pcall(manager.disconnect, manager)
+  assert_equal(false, refused)
+  assert(message:find("RemoteMirrorDisconnect!", 1, true), message)
+  assert_equal(core, manager.current)
+
+  local result = manager:disconnect(true)
+  assert_equal("example", result.name)
+  assert_equal(nil, manager.current)
+  assert_equal("remote-mirror: the workspace was disconnected", queued_error)
+  assert(vim.wait(1000, function()
+    return finished
+  end))
+end)
+
+test("a forced disconnect drops uploads that were waiting to run", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+    watch = false,
+    debounce_ms = 50,
+  })
+  local uploaded = {}
+  local core = require("remote-mirror.core").new(config, {
+    transport = {
+      inspect = function()
+        return nil
+      end,
+      upload = function(_, path)
+        table.insert(uploaded, path)
+      end,
+      delete = function() end,
+    },
+  })
+  core:ensure_layout()
+  require("remote-mirror.util").write_file(config.source_root .. "/notes.txt", "local edit\n")
+
+  local manager = require("remote-mirror.manager").new({
+    registry_path = vim.fn.tempname() .. "/workspaces.json",
+  })
+  manager:_activate(core)
+  core:schedule_upload("notes.txt")
+  assert_equal(1, vim.tbl_count(core.pending))
+
+  local refused, message = pcall(manager.disconnect, manager)
+  assert_equal(false, refused)
+  assert(message:find("waiting to upload", 1, true), message)
+
+  local result = manager:disconnect(true)
+  assert_equal(1, result.pending)
+  assert_equal({}, core.pending)
+
+  vim.wait(300)
+  assert_equal({}, uploaded)
+
+  core:schedule_upload("notes.txt")
+  vim.wait(200)
+  assert_equal({}, uploaded)
 end)
 
 test("watcher sends external changes through the upload scheduler", function()

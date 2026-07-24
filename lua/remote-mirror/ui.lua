@@ -2,9 +2,12 @@ local util = require("remote-mirror.util")
 
 local M = {}
 
+-- Pasted values often carry surrounding whitespace, which the stricter
+-- configuration checks would otherwise reject.
 local function prompt(label, callback)
   vim.ui.input({ prompt = label }, function(value)
-    if value and value ~= "" then
+    value = value and vim.trim(value) or ""
+    if value ~= "" then
       callback(value)
     end
   end)
@@ -23,6 +26,7 @@ local function prompt_connection(manager, workspace, callback)
     if port == nil then
       return
     end
+    port = vim.trim(port)
     vim.ui.input({
       prompt = "SSH user (blank uses SSH config): ",
       default = workspace.user or resolved.user or "",
@@ -30,6 +34,7 @@ local function prompt_connection(manager, workspace, callback)
       if user == nil then
         return
       end
+      user = vim.trim(user)
 
       local ok, password = pcall(
         vim.fn.inputsecret,
@@ -102,7 +107,7 @@ local function confirm_estimate(manager, definition, password, contents, write_i
   end)
 end
 
-local function open_ignore_editor(manager, definition, password, reopen)
+local function open_ignore_editor(manager, definition, password, stats, reopen)
   local config = manager:workspace_options(definition)
   local lines = {
     "# Remote Mirror ignore rules",
@@ -112,6 +117,24 @@ local function open_ignore_editor(manager, definition, password, reopen)
   }
   vim.list_extend(lines, config.default_ignore)
 
+  local suggestions = require("remote-mirror.ignore").suggest(
+    stats and stats.directories,
+    config.default_ignore,
+    ""
+  )
+  local cursor_line = #lines
+  if #suggestions > 0 then
+    vim.list_extend(lines, { "", "# Largest directories the rules above do not cover:" })
+    for _, suggestion in ipairs(suggestions) do
+      table.insert(lines, ("#   %10s  %s/"):format(util.format_bytes(suggestion.size), suggestion.path))
+    end
+    vim.list_extend(lines, { "#", "# Uncomment any of these to keep that directory on the server." })
+    cursor_line = #lines + 1
+    for _, suggestion in ipairs(suggestions) do
+      table.insert(lines, ("# %s/"):format(suggestion.path))
+    end
+  end
+
   local buffer = vim.api.nvim_create_buf(false, true)
   vim.bo[buffer].buftype = "nofile"
   vim.bo[buffer].bufhidden = "wipe"
@@ -120,7 +143,7 @@ local function open_ignore_editor(manager, definition, password, reopen)
   vim.api.nvim_buf_set_name(buffer, "remote-mirror://ignore/" .. definition.name)
   vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
   vim.api.nvim_set_current_buf(buffer)
-  vim.api.nvim_win_set_cursor(0, { #lines, 0 })
+  vim.api.nvim_win_set_cursor(0, { math.min(cursor_line, #lines), 0 })
 
   local function continue_with_rules()
     local rules = vim.api.nvim_buf_get_lines(buffer, 0, -1, false)
@@ -139,16 +162,164 @@ local function open_ignore_editor(manager, definition, password, reopen)
   end, { buffer = buffer, nowait = true })
 end
 
+local browser_header_lines = 3
+
+local function join_remote(directory, name)
+  if directory == "/" then
+    return "/" .. name
+  end
+  return directory .. "/" .. name
+end
+
+local function open_remote_browser(manager, workspace, password, on_select, on_cancel)
+  local buffer = vim.api.nvim_create_buf(false, true)
+  vim.bo[buffer].buftype = "nofile"
+  vim.bo[buffer].bufhidden = "wipe"
+  vim.bo[buffer].swapfile = false
+  vim.bo[buffer].filetype = "remote-mirror-browser"
+  vim.api.nvim_buf_set_name(buffer, "remote-mirror://browse/" .. workspace.name)
+  vim.api.nvim_set_current_buf(buffer)
+
+  local state = { path = nil, entries = {}, visible = {}, hidden = false, loading = false }
+
+  local function set_lines(lines, cursor)
+    if not vim.api.nvim_buf_is_valid(buffer) then
+      return
+    end
+    vim.bo[buffer].modifiable = true
+    vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
+    vim.bo[buffer].modifiable = false
+    if cursor and vim.api.nvim_get_current_buf() == buffer then
+      vim.api.nvim_win_set_cursor(0, { math.min(cursor, #lines), 0 })
+    end
+  end
+
+  local function render(message)
+    state.visible = {}
+    for _, entry in ipairs(state.entries) do
+      if state.hidden or entry.name:sub(1, 1) ~= "." then
+        table.insert(state.visible, entry)
+      end
+    end
+
+    local lines = {
+      ("Remote path: %s"):format(state.path or "unknown"),
+      ("Enter open   -  parent   .  use this path   i  type a path   H  dotfiles: %s   r  refresh   q  cancel"):format(
+        state.hidden and "shown" or "hidden"
+      ),
+      "",
+    }
+    for _, entry in ipairs(state.visible) do
+      table.insert(lines, ("  %s%s"):format(entry.name, entry.kind == "directory" and "/" or ""))
+    end
+    if message then
+      table.insert(lines, "  " .. message)
+    elseif #state.visible == 0 then
+      table.insert(lines, "  This directory has no visible entries.")
+    end
+    set_lines(lines, browser_header_lines + 1)
+  end
+
+  local function load(path)
+    if state.loading then
+      return
+    end
+    state.loading = true
+    set_lines({
+      ("Remote path: %s"):format(path or "home directory"),
+      "",
+      "  listing directory",
+    })
+    manager:browse_remote_async(workspace, password, path, function(ok, listing)
+      state.loading = false
+      if not vim.api.nvim_buf_is_valid(buffer) then
+        return
+      end
+      if not ok then
+        util.notify(listing, vim.log.levels.ERROR)
+        if state.path then
+          render()
+        else
+          render("Could not read this directory. Press i to type a path, or q to cancel.")
+        end
+        return
+      end
+      state.path = listing.path
+      state.entries = listing.entries
+      render()
+    end)
+  end
+
+  local function entry_under_cursor()
+    if state.loading or vim.api.nvim_get_current_buf() ~= buffer then
+      return nil
+    end
+    return state.visible[vim.api.nvim_win_get_cursor(0)[1] - browser_header_lines]
+  end
+
+  local function map(lhs, callback)
+    vim.keymap.set("n", lhs, callback, { buffer = buffer, nowait = true })
+  end
+
+  map("<CR>", function()
+    local entry = entry_under_cursor()
+    if not entry then
+      return
+    end
+    if entry.kind ~= "directory" then
+      util.notify("the project root must be a directory", vim.log.levels.WARN)
+      return
+    end
+    load(join_remote(state.path, entry.name))
+  end)
+  map("-", function()
+    if state.loading or not state.path or state.path == "/" then
+      return
+    end
+    load(vim.fs.dirname(state.path))
+  end)
+  map(".", function()
+    if state.loading or not state.path then
+      return
+    end
+    on_select(state.path)
+  end)
+  map("i", function()
+    vim.ui.input({ prompt = "Remote path: ", default = state.path or "" }, function(value)
+      if value == nil or value == "" then
+        return
+      end
+      local trimmed = (value:gsub("/+$", ""))
+      load(trimmed ~= "" and trimmed or "/")
+    end)
+  end)
+  map("H", function()
+    if state.loading then
+      return
+    end
+    state.hidden = not state.hidden
+    render()
+  end)
+  map("r", function()
+    load(state.path)
+  end)
+  map("q", function()
+    if vim.api.nvim_buf_is_valid(buffer) then
+      vim.api.nvim_buf_delete(buffer, { force = true })
+    end
+    on_cancel()
+  end)
+
+  load(nil)
+end
+
 local function add_workspace(manager, reopen)
   prompt("Workspace name: ", function(name)
     prompt("SSH host or alias: ", function(host)
       prompt_connection(manager, { host = host }, function(connection, password)
-        prompt("Remote project root: ", function(remote_root)
-          local definition = vim.tbl_extend("force", connection, {
-            name = name,
-            host = host,
-            remote_root = remote_root,
-          })
+        local base = vim.tbl_extend("force", connection, { name = name, host = host })
+        open_remote_browser(manager, base, password, function(remote_root)
+          local definition = vim.tbl_extend("force", base, { remote_root = remote_root })
           util.notify("inspecting remote workspace")
           manager:inspect_workspace_async(definition, password, function(inspect_ok, stats)
             if not inspect_ok then
@@ -181,13 +352,13 @@ local function add_workspace(manager, reopen)
               "Cancel",
             }, { prompt = prompt_text }, function(choice)
               if choice == configure then
-                open_ignore_editor(manager, definition, password, reopen)
+                open_ignore_editor(manager, definition, password, stats, reopen)
               elseif choice == "Continue with built-in ignores" then
                 confirm_estimate(manager, definition, password, "", false, reopen)
               end
             end)
           end)
-        end)
+        end, reopen)
       end)
     end)
   end)

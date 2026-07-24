@@ -25,6 +25,7 @@ function M.register(manager)
   local group = vim.api.nvim_create_augroup("RemoteMirror", { clear = true })
   local command_names = {
     "RemoteMirrorConnect",
+    "RemoteMirrorDisconnect",
     "RemoteMirrorPull",
     "RemoteMirrorPush",
     "RemoteMirrorRefresh",
@@ -38,6 +39,21 @@ function M.register(manager)
   vim.api.nvim_create_user_command("RemoteMirrorConnect", safely(function()
     require("remote-mirror.ui").open(manager)
   end), { desc = "Open the remote workspace connection screen" })
+
+  vim.api.nvim_create_user_command("RemoteMirrorDisconnect", safely(function(options)
+    local result = manager:disconnect(options.bang)
+    if result.pending > 0 then
+      util.notify(
+        ("disconnected %s; discarded %d pending upload(s)"):format(result.name, result.pending),
+        vim.log.levels.WARN
+      )
+      return
+    end
+    util.notify("disconnected " .. result.name)
+  end), {
+    bang = true,
+    desc = "Disconnect the active remote workspace, keeping its mirror on disk",
+  })
 
   vim.api.nvim_create_user_command("RemoteMirrorPull", safely(function()
     local core = manager:require_current()

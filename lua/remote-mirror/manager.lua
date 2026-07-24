@@ -106,8 +106,7 @@ function M:remove(name)
   assert(self.registry.workspaces[name], "remote-mirror: unknown workspace " .. name)
   assert(self.connecting ~= name, "remote-mirror: cannot delete a workspace while it is connecting")
   if self.current and self.current.config.name == name then
-    self.current:stop_watcher()
-    self.current = nil
+    self:_deactivate()
   end
   self.credentials[name] = nil
   self.registry:remove(name)
@@ -141,12 +140,52 @@ end
 
 function M:_activate(core)
   if self.current then
-    self.current:stop_watcher()
+    self.current:detach()
+  else
+    self.previous_cwd = vim.fn.getcwd()
   end
   core:start_watcher()
   self.current = core
   vim.cmd.cd(vim.fn.fnameescape(core.config.source_root))
   return core
+end
+
+function M:_deactivate()
+  local core = self.current
+  if not core then
+    return
+  end
+  core:detach()
+  self.current = nil
+
+  local previous = self.previous_cwd
+  self.previous_cwd = nil
+  if previous and vim.fn.isdirectory(previous) == 1 then
+    vim.cmd.cd(vim.fn.fnameescape(previous))
+  end
+  return core
+end
+
+function M:disconnect(force)
+  local core = assert(self.current, "remote-mirror: no workspace is connected")
+  assert(not self.connecting, "remote-mirror: a workspace connection is in progress")
+
+  local pending = vim.tbl_count(core.pending)
+  if not force then
+    assert(
+      not core.operation_active and #core.operation_queue == 0,
+      "remote-mirror: a workspace operation is running; wait for it or use :RemoteMirrorDisconnect!"
+    )
+    assert(
+      pending == 0,
+      ("remote-mirror: %d file(s) are waiting to upload; wait for them or use :RemoteMirrorDisconnect!"):format(
+        pending
+      )
+    )
+  end
+
+  self:_deactivate()
+  return { name = core.config.name, pending = pending }
 end
 
 function M:connect(name)
@@ -269,6 +308,32 @@ function M:cancel_review()
   self.connecting = false
 end
 
+-- The remote root is what the caller is browsing for, so a placeholder keeps
+-- configuration normalization happy until a directory is picked.
+function M:browse_remote_async(workspace, password, path, callback)
+  local definition = vim.tbl_extend("force", {}, workspace)
+  definition.remote_root = "/"
+  local ok, config = pcall(self.workspace_options, self, definition)
+  if not ok then
+    callback(false, config)
+    return
+  end
+  local resolved = self:resolve_ssh(config.host, config.ssh_command)
+  config.ssh_config_file = config.ssh_config_file or resolved.config_file
+  if config.auth == "password" then
+    config._password = password
+    if not config._password or config._password == "" then
+      callback(false, "remote-mirror: password is required")
+      return
+    end
+  end
+
+  local transport = Transport.new(config, require("remote-mirror.async").runner)
+  require("remote-mirror.async").run(function()
+    return transport:list_directory(path)
+  end, callback)
+end
+
 function M:inspect_workspace_async(workspace, password, callback)
   local ok, config = pcall(self.workspace_options, self, workspace)
   if not ok then
@@ -339,7 +404,7 @@ end
 function M:stop()
   self:cancel_review()
   if self.current then
-    self.current:stop_watcher()
+    self.current:detach()
   end
 end
 

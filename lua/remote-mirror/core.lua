@@ -27,6 +27,21 @@ function M:enqueue(operation, callback)
   self:_drain_operations()
 end
 
+-- A detached core must not start new work: queued operations are reported as
+-- failures and debounced uploads are dropped instead of firing later.
+function M:detach()
+  self.detached = true
+  self.pending = {}
+  local queued = self.operation_queue
+  self.operation_queue = {}
+  self:stop_watcher()
+  for _, item in ipairs(queued) do
+    if item.callback then
+      item.callback(false, "remote-mirror: the workspace was disconnected")
+    end
+  end
+end
+
 function M:_drain_operations()
   if self.operation_active or #self.operation_queue == 0 then
     return
@@ -452,6 +467,9 @@ function M:materialize(path)
 end
 
 function M:schedule_upload(path)
+  if self.detached then
+    return
+  end
   local local_hash = util.hash_file(util.join(self.config.source_root, path))
   local entry = self.state.data.files[path]
   if (local_hash and entry and local_hash == entry.local_hash)
@@ -464,6 +482,10 @@ function M:schedule_upload(path)
   end
   self.pending[path] = true
   vim.defer_fn(function()
+    if self.detached then
+      self.pending[path] = nil
+      return
+    end
     self:enqueue(function()
       return self:push_file(path, false)
     end, function(ok, result)
