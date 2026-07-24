@@ -122,8 +122,45 @@ function M:has_local_mirror(name)
   return scan ~= nil and vim.uv.fs_scandir_next(scan) ~= nil
 end
 
+function M:get(name)
+  return self.registry.workspaces[name]
+end
+
+-- Reports a mirror that was built for a different host or remote path, which
+-- happens when a workspace name is reused for another endpoint.
+function M:mirror_conflict(name)
+  local workspace = self.registry.workspaces[name]
+  if not workspace then
+    return nil
+  end
+  local ok, config = pcall(self.workspace_options, self, workspace)
+  if not ok then
+    return nil
+  end
+  local state = require("remote-mirror.state").new(config):load()
+  if not state.foreign then
+    return nil
+  end
+  return {
+    host = state.foreign.host,
+    remote_root = state.foreign.remote_root,
+    mirror_root = config.mirror_root,
+  }
+end
+
 function M:_build_core(name)
   local workspace = assert(self.registry.workspaces[name], "remote-mirror: unknown workspace " .. name)
+  local conflict = self:mirror_conflict(name)
+  if conflict then
+    error(
+      ("remote-mirror: the mirror at %s belongs to %s:%s; rename this workspace or remove that directory"):format(
+        conflict.mirror_root,
+        conflict.host,
+        conflict.remote_root
+      ),
+      0
+    )
+  end
   local config = self:workspace_options(workspace)
   local resolved = self:resolve_ssh(config.host, config.ssh_command)
   config.ssh_config_file = config.ssh_config_file or resolved.config_file

@@ -1106,6 +1106,87 @@ test("can clear explicit workspace connection overrides", function()
   assert_equal("ssh", manager.registry.workspaces.website.auth)
 end)
 
+test("reports a mirror that was built for another endpoint", function()
+  local mirror_root = vim.fn.tempname()
+  local function workspace(host, remote_root, user)
+    return require("remote-mirror.config").normalize({
+      name = "website",
+      host = host,
+      user = user,
+      remote_root = remote_root,
+      mirror_root = mirror_root,
+    })
+  end
+
+  local first = workspace("server-a", "/srv/site")
+  local core = require("remote-mirror.core").new(first)
+  core:ensure_layout()
+  core.state:save()
+
+  local reconnected = require("remote-mirror.state").new(workspace("server-a", "/srv/site", "deploy")):load()
+  assert_equal(nil, reconnected.foreign)
+
+  local moved_host = require("remote-mirror.state").new(workspace("server-b", "/srv/site")):load()
+  assert_equal({ host = "server-a", remote_root = "/srv/site" }, moved_host.foreign)
+
+  local moved_path = require("remote-mirror.state").new(workspace("server-a", "/var/www")):load()
+  assert_equal({ host = "server-a", remote_root = "/srv/site" }, moved_path.foreign)
+end)
+
+test("adopts a mirror written before endpoints were recorded", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+  })
+  local util = require("remote-mirror.util")
+  util.write_file(
+    util.join(config.state_root, "state.json"),
+    vim.json.encode({ version = 1, files = {}, conflicts = {} })
+  )
+  local state = require("remote-mirror.state").new(config):load()
+  assert_equal(nil, state.foreign)
+end)
+
+test("refuses to connect a workspace whose name was reused for another host", function()
+  local mirror_root = vim.fn.tempname()
+  local first = require("remote-mirror.config").normalize({
+    name = "website",
+    host = "server-a",
+    remote_root = "/srv/site",
+    mirror_root = mirror_root,
+  })
+  local core = require("remote-mirror.core").new(first)
+  core:ensure_layout()
+  core.state:save()
+
+  local manager = require("remote-mirror.manager").new({
+    registry_path = vim.fn.tempname() .. "/workspaces.json",
+    workspaces = {
+      {
+        name = "website",
+        host = "server-b",
+        remote_root = "/var/www",
+        mirror_root = mirror_root,
+      },
+    },
+  })
+
+  local conflict = manager:mirror_conflict("website")
+  assert_equal("server-a", conflict.host)
+  assert_equal("/srv/site", conflict.remote_root)
+
+  local failed, message = nil, nil
+  manager:connect_async("website", "force_push", function(ok, result)
+    failed = not ok
+    message = result
+  end)
+  assert_equal(true, failed)
+  assert(message:find(mirror_root, 1, true), message)
+  assert(message:find("server-a:/srv/site", 1, true), message)
+  assert_equal(nil, manager.current)
+end)
+
 test("deletes a workspace registration without touching its mirror", function()
   local registry_path = vim.fn.tempname() .. "/workspaces.json"
   local mirror_root = vim.fn.tempname()

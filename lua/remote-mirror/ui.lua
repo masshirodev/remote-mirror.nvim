@@ -313,8 +313,34 @@ local function open_remote_browser(manager, workspace, password, on_select, on_c
   load(nil)
 end
 
-local function add_workspace(manager, reopen)
+-- A reused name rebinds the registration and hands the new endpoint the old
+-- mirror, so the collision is settled before anything else is asked.
+local function prompt_workspace_name(manager, callback)
   prompt("Workspace name: ", function(name)
+    local existing = manager:get(name)
+    if not existing then
+      callback(name)
+      return
+    end
+
+    local replace = ("Replace it (its mirror stays bound to %s:%s)"):format(
+      existing.host,
+      existing.remote_root
+    )
+    vim.ui.select({ "Choose another name", replace, "Cancel" }, {
+      prompt = ("%s already points at %s:%s."):format(name, existing.host, existing.remote_root),
+    }, function(choice)
+      if choice == "Choose another name" then
+        prompt_workspace_name(manager, callback)
+      elseif choice == replace then
+        callback(name)
+      end
+    end)
+  end)
+end
+
+local function add_workspace(manager, reopen)
+  prompt_workspace_name(manager, function(name)
     prompt("SSH host or alias: ", function(host)
       prompt_connection(manager, { host = host }, function(connection, password)
         local base = vim.tbl_extend("force", connection, { name = name, host = host })

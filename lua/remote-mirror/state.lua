@@ -34,10 +34,22 @@ function M:load()
   assert(decoded.version == 1, "remote-mirror: unsupported state version")
   decoded.files = decoded.files or {}
   decoded.conflicts = decoded.conflicts or {}
+  local stored = type(decoded.project) == "table" and decoded.project or {}
   -- A reused mirror must describe the workspace selected for this connection,
   -- not the endpoint that happened to create its first state file.
   decoded.project = self.data.project
   self.data = decoded
+
+  -- Recorded hashes and file entries only describe the endpoint that produced
+  -- them, so a mirror pointed at a different one is reported rather than
+  -- silently adopted. Mirrors written before this was recorded are adopted.
+  if stored.host and stored.remote_root then
+    local same = stored.host == self.data.project.host
+      and stored.remote_root == self.data.project.remote_root
+    if not same then
+      self.foreign = { host = stored.host, remote_root = stored.remote_root }
+    end
+  end
   return self
 end
 

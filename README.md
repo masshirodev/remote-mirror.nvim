@@ -118,6 +118,19 @@ Press `d` to remove a workspace registration after confirmation. Its backing
 mirror and synchronization state are preserved, so adding the same workspace
 again recovers it.
 
+A name identifies both the registration and the local mirror directory, so
+reusing one rebinds the registration and points the new endpoint at the
+existing mirror. The add screen reports the collision as soon as the name is
+entered and offers to choose another one.
+
+Each mirror also records the host and remote path it was built from. When a
+name ends up pointing somewhere else, connecting is refused and names the
+mirror directory involved, because that mirror's files and recorded hashes
+describe the previous endpoint; a force push would otherwise upload one
+server's project into another. Rename the workspace or delete the reported
+directory. Mirrors created before this was recorded are adopted by whichever
+workspace uses them.
+
 Workspaces can also be declared:
 
 ```lua
