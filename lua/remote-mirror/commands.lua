@@ -30,6 +30,7 @@ function M.register(manager)
     "RemoteMirrorPull",
     "RemoteMirrorPush",
     "RemoteMirrorRefresh",
+    "RemoteMirrorPoll",
     "RemoteMirrorConflicts",
     "RemoteMirrorResolve",
   }
@@ -105,6 +106,13 @@ function M.register(manager)
     end)
   end), { desc = "Refresh the active remote manifest" })
 
+  vim.api.nvim_create_user_command("RemoteMirrorPoll", safely(function()
+    local scheduled, reason = manager:require_current():schedule_poll()
+    if not scheduled then
+      util.notify(reason)
+    end
+  end), { desc = "Check open workspace files for remote changes" })
+
   vim.api.nvim_create_user_command("RemoteMirrorConflicts", safely(function()
     local conflicts = manager:require_current().state.data.conflicts
     if vim.tbl_isempty(conflicts) then
@@ -143,6 +151,17 @@ function M.register(manager)
       end
     end,
     desc = "Upload saved remote-mirror files",
+  })
+
+  vim.api.nvim_create_autocmd("FocusGained", {
+    group = group,
+    callback = function()
+      local core = manager.current
+      if core and core.config.poll_on_focus then
+        core:schedule_poll()
+      end
+    end,
+    desc = "Check open remote-mirror files when Neovim regains focus",
   })
 
   vim.api.nvim_create_autocmd("VimLeavePre", {

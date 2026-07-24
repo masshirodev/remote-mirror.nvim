@@ -196,6 +196,34 @@ pwd
   return { path = root ~= "" and root or "/", entries = entries }
 end
 
+-- Only the handful of paths the user has open is polled, so one `stat` call
+-- covers them without the whole-tree walk `manifest` needs. Paths that no
+-- longer exist are simply absent from the reply.
+function M:signatures(paths)
+  if #paths == 0 then
+    return {}
+  end
+  local quoted = {}
+  for _, path in ipairs(paths) do
+    table.insert(quoted, util.shell_quote(self.config.remote_root .. "/" .. path))
+  end
+  local command = ("%s -c '%%s\t%%Y\t%%n' -- %s 2>/dev/null || true"):format(
+    util.shell_quote(self.config.remote_stat_command),
+    table.concat(quoted, " ")
+  )
+  local result = self:ssh(command)
+
+  local prefix = self.config.remote_root .. "/"
+  local signatures = {}
+  for line in result.stdout:gmatch("[^\r\n]+") do
+    local size, mtime, name = line:match("^(%d+)\t(%d+)\t(.+)$")
+    if name and name:sub(1, #prefix) == prefix then
+      signatures[name:sub(#prefix + 1)] = util.signature(size, mtime)
+    end
+  end
+  return signatures
+end
+
 function M:inspect(path)
   local absolute = self.config.remote_root .. "/" .. path
   local quoted = util.shell_quote(absolute)

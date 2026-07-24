@@ -15,6 +15,7 @@ navigating a `source/` directory.
 - `rsync` bulk transfer with an SCP fallback for hosts without rsync;
 - complete remote file manifest with lazy opening of ignored files;
 - automatic uploads for Neovim saves and external filesystem changes;
+- focus-triggered checks that keep open files current with the remote;
 - explicit push, refresh, disconnect, and conflict resolution;
 - hash checks that prevent silent remote overwrites.
 
@@ -250,6 +251,7 @@ push, or resolution reconciles it.
 | `:RemoteMirrorPull` | Pull while protecting locally changed files |
 | `:RemoteMirrorPush` | Push locally changed, created, and deleted files |
 | `:RemoteMirrorRefresh` | Compare the remote manifest without transferring |
+| `:RemoteMirrorPoll` | Check open files for remote changes |
 | `:RemoteMirrorConflicts` | Display recorded conflicts |
 | `:RemoteMirrorResolve {path} pull` | Replace the local file with the remote version |
 | `:RemoteMirrorResolve {path} push` | Explicitly overwrite the remote version |
@@ -298,6 +300,48 @@ scripts enter the same debounced upload path as `BufWritePost`.
 New directories are discovered whenever the watcher rescans. Set `watch =
 false` to disable external-change watching, or change `watch_debounce_ms`
 (default `300`) and `debounce_ms` (default `200`) to tune batching.
+
+## Remote change checks
+
+A remote workspace can change while Neovim is watching it: a teammate edits a
+file, a deploy rewrites one, or a build runs on the host. Nothing on the remote
+announces that, so the plugin checks for it whenever Neovim regains focus,
+which is exactly when the user returns from the terminal that made the change.
+
+The check covers the files currently open in buffers rather than the whole
+workspace. Those are the files that can go stale under the user, and a small
+set means one `stat` call over the existing SSH connection instead of the
+whole-tree walk `:RemoteMirrorRefresh` performs. Use a refresh or `r` on the
+workspace screen to compare everything.
+
+Each changed file is handled by how much local work is at stake:
+
+- **The local copy still matches the last transfer:** the remote version is
+  downloaded and the buffer is reloaded, the way `'autoread'` handles an
+  external edit.
+- **The local copy changed, or its buffer has unsaved text:** nothing is
+  transferred. A conflict is recorded and the file is marked on the workspace
+  screen, leaving the choice to `:RemoteMirrorResolve`.
+- **The file was deleted on the remote:** it is marked and reported, and the
+  local copy is kept. A background check never deletes local files; that is
+  what an explicit pull does.
+
+`:RemoteMirrorPoll` runs the same check on demand, which is useful as a
+keymap. Checks run through the shared operation queue, so they never overlap a
+pull, a push, or each other.
+
+```lua
+require("remote-mirror").setup({
+  poll_on_focus = true,
+  poll_interval_ms = 0,
+  poll_auto_pull = true,
+})
+```
+
+Set `poll_on_focus = false` to check only on demand, and `poll_auto_pull =
+false` to report changed files without downloading them. `poll_interval_ms`
+adds a periodic check on top of the focus trigger; it is disabled by default,
+because polling on a timer keeps an idle session talking to the host.
 
 ## Ignore rules
 

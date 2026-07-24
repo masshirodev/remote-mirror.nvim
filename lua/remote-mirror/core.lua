@@ -35,6 +35,7 @@ function M:detach()
   local queued = self.operation_queue
   self.operation_queue = {}
   self:stop_watcher()
+  self:stop_poll_timer()
   for _, item in ipairs(queued) do
     if item.callback then
       item.callback(false, "remote-mirror: the workspace was disconnected")
@@ -508,6 +509,168 @@ function M:materialize(path)
     self:_reload_buffers({ path })
   end
   return util.join(self.config.source_root, path)
+end
+
+-- Remote edits are only discovered when something asks, and asking means a
+-- whole-tree walk. The files the user has open are the ones that can go stale
+-- underneath them, and they are few enough to check on every window focus.
+function M:open_paths()
+  local targets, seen = {}, {}
+  for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(buffer) and vim.bo[buffer].buftype == "" then
+      local name = vim.api.nvim_buf_get_name(buffer)
+      local relative = name ~= "" and util.relative_path(self.config.source_root, name) or nil
+      if relative and relative ~= "" and not seen[relative] and self.state.data.files[relative] then
+        seen[relative] = true
+        table.insert(targets, { path = relative, modified = vim.bo[buffer].modified })
+      end
+    end
+  end
+  table.sort(targets, function(left, right)
+    return left.path < right.path
+  end)
+  return targets
+end
+
+function M:poll(targets)
+  local paths = {}
+  for _, target in ipairs(targets) do
+    table.insert(paths, target.path)
+  end
+  local signatures = self.transport:signatures(paths)
+  local pulled, changed, conflicts, removed = {}, {}, {}, {}
+
+  for _, target in ipairs(targets) do
+    local path = target.path
+    local entry = self.state.data.files[path]
+    local signature = signatures[path]
+    if entry then
+      entry.observed_remote_signature = signature or vim.NIL
+
+      if signature == nil then
+        if entry.remote_signature ~= vim.NIL then
+          table.insert(removed, path)
+        end
+      elseif signature ~= entry.remote_signature then
+        local absolute = util.join(self.config.source_root, path)
+        local local_hash = util.hash_file(absolute)
+        -- Unsaved buffer text is a local change that has not reached the file
+        -- yet, so it protects the path exactly like a written one would.
+        local clean = not target.modified and local_hash ~= nil and local_hash == entry.local_hash
+
+        if not clean then
+          local observed = self.transport:inspect(path)
+          self.state:add_conflict(
+            path,
+            "remote_modified",
+            local_hash,
+            observed and observed.hash or nil,
+            entry.remote_hash ~= vim.NIL and entry.remote_hash or nil
+          )
+          table.insert(conflicts, path)
+        elseif not self.config.poll_auto_pull then
+          table.insert(changed, path)
+        else
+          self.transport:download(path)
+          local inspected = self.transport:inspect(path)
+          local hash = util.hash_file(absolute)
+          self.state.data.files[path] = {
+            remote_hash = inspected and inspected.hash or hash or vim.NIL,
+            remote_signature = inspected and inspected.signature or vim.NIL,
+            observed_remote_signature = inspected and inspected.signature or vim.NIL,
+            local_hash = hash or vim.NIL,
+            materialized = hash ~= nil,
+            size = inspected and inspected.size or vim.NIL,
+            mtime = inspected and inspected.mtime or os.time(),
+          }
+          self.state:clear_conflict(path)
+          table.insert(pulled, path)
+        end
+      end
+    end
+  end
+
+  self.state.data.last_poll = os.time()
+  self.state:save()
+  if #pulled > 0 and self.watcher then
+    self.watcher:resnapshot()
+  end
+  self:_reload_buffers(pulled)
+
+  return {
+    checked = #paths,
+    pulled = pulled,
+    changed = changed,
+    conflicts = conflicts,
+    removed = removed,
+  }
+end
+
+function M:schedule_poll(on_complete)
+  if self.detached then
+    return false, "the workspace was disconnected"
+  end
+  if self.polling then
+    return false, "a check is already running"
+  end
+  local targets = self:open_paths()
+  if #targets == 0 then
+    if on_complete then
+      on_complete(true, { checked = 0, pulled = {}, changed = {}, conflicts = {}, removed = {} })
+    end
+    return false, "no open workspace files to check"
+  end
+
+  self.polling = true
+  self:enqueue(function()
+    return self:poll(targets)
+  end, function(ok, result)
+    self.polling = false
+    if not ok then
+      util.notify(result, vim.log.levels.ERROR)
+    else
+      local report = {}
+      local function add(paths, label)
+        if #paths > 0 then
+          table.insert(report, ("%d %s"):format(#paths, label))
+        end
+      end
+      add(result.pulled, "updated")
+      add(result.changed, "changed on the remote")
+      add(result.conflicts, "conflicted")
+      add(result.removed, "deleted on the remote")
+      if #report > 0 then
+        util.notify(
+          table.concat(report, "; "),
+          #result.conflicts > 0 and vim.log.levels.WARN or vim.log.levels.INFO
+        )
+      end
+    end
+    if on_complete then
+      on_complete(ok, result)
+    end
+  end)
+  return true
+end
+
+function M:start_poll_timer()
+  self:stop_poll_timer()
+  local interval = self.config.poll_interval_ms
+  if not interval or interval <= 0 then
+    return
+  end
+  self.poll_timer = vim.uv.new_timer()
+  self.poll_timer:start(interval, interval, vim.schedule_wrap(function()
+    self:schedule_poll()
+  end))
+end
+
+function M:stop_poll_timer()
+  if self.poll_timer then
+    self.poll_timer:stop()
+    self.poll_timer:close()
+    self.poll_timer = nil
+  end
 end
 
 function M:schedule_upload(path)

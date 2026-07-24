@@ -228,6 +228,7 @@ function M:_activate(core)
     self.previous_cwd = vim.fn.getcwd()
   end
   core:start_watcher()
+  core:start_poll_timer()
   self.current = core
   vim.cmd.cd(vim.fn.fnameescape(core.config.source_root))
   return core
@@ -276,6 +277,7 @@ function M:connect(name)
   assert(workspace, "remote-mirror: unknown workspace " .. name)
   if self.current then
     self.current:stop_watcher()
+    self.current:stop_poll_timer()
     self.current = nil
   end
 
@@ -292,6 +294,7 @@ function M:connect(name)
   core:ensure_layout()
   core:pull()
   core:start_watcher()
+  core:start_poll_timer()
   self.current = core
   vim.cmd.cd(vim.fn.fnameescape(core.config.source_root))
   return core

@@ -45,4 +45,8 @@ function M.refresh()
   return manager():require_current():refresh()
 end
 
+function M.poll(on_complete)
+  return manager():require_current():schedule_poll(on_complete)
+end
+
 return M

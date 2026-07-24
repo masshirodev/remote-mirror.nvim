@@ -1568,6 +1568,153 @@ test("reloads buffers rewritten by a pull", function()
   vim.cmd(("bwipeout! %d"):format(buffer))
 end)
 
+test("polls open paths with one stat call", function()
+  local root = vim.fn.tempname() .. " with quote's"
+  local util = require("remote-mirror.util")
+  util.ensure_dir(util.join(root, "src"))
+  util.write_file(util.join(root, "src/main.lua"), "return true\n")
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = root,
+    mirror_root = vim.fn.tempname(),
+  })
+  local calls = 0
+  local runner = function(command)
+    calls = calls + 1
+    return vim.system({ "sh", "-c", command[#command] }, { text = true }):wait()
+  end
+  local transport = require("remote-mirror.transport").new(config, runner)
+  local signatures = transport:signatures({ "src/main.lua", "gone.lua" })
+
+  assert_equal(1, calls)
+  assert_equal(transport:manifest()["src/main.lua"].signature, signatures["src/main.lua"])
+  assert_equal(nil, signatures["gone.lua"])
+  assert_equal({}, require("remote-mirror.transport").new(config, function()
+    error("runner should not be used")
+  end):signatures({}))
+end)
+
+local function poll_fixture(options)
+  local config = require("remote-mirror.config").normalize(vim.tbl_extend("force", {
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+  }, options or {}))
+  local util = require("remote-mirror.util")
+  util.ensure_dir(config.source_root)
+  local absolute = util.join(config.source_root, "main.lua")
+  util.write_file(absolute, "before\n")
+
+  local downloaded = {}
+  local transport = {
+    signatures = function()
+      return { ["main.lua"] = "5:1700000009" }
+    end,
+    inspect = function()
+      return { hash = "remote-hash", signature = "5:1700000009", size = 5, mtime = 1700000009 }
+    end,
+    download = function(_, path)
+      table.insert(downloaded, path)
+      util.write_file(absolute, "after\n")
+    end,
+  }
+  local core = require("remote-mirror.core").new(config, { transport = transport })
+  core.state.data.files["main.lua"] = {
+    remote_hash = "base-hash",
+    remote_signature = "6:1700000000",
+    observed_remote_signature = "6:1700000000",
+    local_hash = util.hash_file(absolute),
+    materialized = true,
+  }
+  return core, absolute, downloaded
+end
+
+test("a poll pulls a remotely changed file whose local copy is untouched", function()
+  local core, absolute, downloaded = poll_fixture()
+  local result = core:poll({ { path = "main.lua", modified = false } })
+
+  assert_equal({ "main.lua" }, downloaded)
+  assert_equal({ "main.lua" }, result.pulled)
+  assert_equal({}, result.conflicts)
+  assert_equal("after\n", require("remote-mirror.util").read_file(absolute))
+  assert_equal("5:1700000009", core.state.data.files["main.lua"].remote_signature)
+  assert_equal(nil, core.state.data.conflicts["main.lua"])
+end)
+
+test("a poll leaves a locally changed file alone and records the conflict", function()
+  local core, absolute, downloaded = poll_fixture()
+  require("remote-mirror.util").write_file(absolute, "local edit\n")
+  local result = core:poll({ { path = "main.lua", modified = false } })
+
+  assert_equal({}, downloaded)
+  assert_equal({ "main.lua" }, result.conflicts)
+  assert_equal("local edit\n", require("remote-mirror.util").read_file(absolute))
+  assert_equal("remote_modified", core.state.data.conflicts["main.lua"].kind)
+  -- The baseline must not advance, so the file stays marked until it is resolved.
+  assert_equal("6:1700000000", core.state.data.files["main.lua"].remote_signature)
+  assert_equal("remote_changed", require("remote-mirror.state").file_status(
+    core.state.data.files["main.lua"]
+  ))
+end)
+
+test("a poll never overwrites a file whose buffer has unsaved changes", function()
+  local core, _, downloaded = poll_fixture()
+  local result = core:poll({ { path = "main.lua", modified = true } })
+
+  assert_equal({}, downloaded)
+  assert_equal({ "main.lua" }, result.conflicts)
+end)
+
+test("a poll reports a remotely changed file when auto pull is disabled", function()
+  local core, absolute, downloaded = poll_fixture({ poll_auto_pull = false })
+  local result = core:poll({ { path = "main.lua", modified = false } })
+
+  assert_equal({}, downloaded)
+  assert_equal({ "main.lua" }, result.changed)
+  assert_equal({}, result.conflicts)
+  assert_equal("before\n", require("remote-mirror.util").read_file(absolute))
+end)
+
+test("a poll reports a remote deletion without deleting the local file", function()
+  local core, absolute, downloaded = poll_fixture()
+  core.transport.signatures = function()
+    return {}
+  end
+  local result = core:poll({ { path = "main.lua", modified = false } })
+
+  assert_equal({}, downloaded)
+  assert_equal({ "main.lua" }, result.removed)
+  assert_equal(true, require("remote-mirror.util").is_file(absolute))
+  assert_equal("remote_deleted", require("remote-mirror.state").file_status(
+    core.state.data.files["main.lua"]
+  ))
+end)
+
+test("only loaded workspace files are polled", function()
+  local core, absolute = poll_fixture()
+  local util = require("remote-mirror.util")
+  util.write_file(util.join(core.config.source_root, "untracked.lua"), "x\n")
+
+  assert_equal({}, core:open_paths())
+  vim.cmd.edit(vim.fn.fnameescape(absolute))
+  vim.cmd.edit(vim.fn.fnameescape(util.join(core.config.source_root, "untracked.lua")))
+  -- The untracked file has no manifest entry, so there is nothing to compare.
+  assert_equal({ { path = "main.lua", modified = false } }, core:open_paths())
+
+  for _, name in ipairs({ "main.lua", "untracked.lua" }) do
+    vim.cmd(("bwipeout! %d"):format(vim.fn.bufnr(util.join(core.config.source_root, name))))
+  end
+end)
+
+test("a detached workspace stops polling", function()
+  local core = poll_fixture({ poll_interval_ms = 1000 })
+  core:start_poll_timer()
+  assert(core.poll_timer)
+  core:detach()
+  assert_equal(nil, core.poll_timer)
+  assert_equal(false, (core:schedule_poll()))
+end)
+
 for _, item in ipairs(tests) do
   local ok, err = pcall(item.callback)
   if ok then

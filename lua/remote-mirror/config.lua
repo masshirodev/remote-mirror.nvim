@@ -7,6 +7,9 @@ local defaults = {
   debounce_ms = 200,
   watch = true,
   watch_debounce_ms = 300,
+  poll_on_focus = true,
+  poll_interval_ms = 0,
+  poll_auto_pull = true,
   ssh_connect_timeout = 10,
   ssh_command = "ssh",
   ssh_args = {},
@@ -111,6 +114,7 @@ function M.normalize(options)
   assert(type(options.default_ignore) == "table", "remote-mirror: default_ignore must be a table")
   assert(options.debounce_ms >= 0, "remote-mirror: debounce_ms must be non-negative")
   assert(options.watch_debounce_ms >= 0, "remote-mirror: watch_debounce_ms must be non-negative")
+  assert(options.poll_interval_ms >= 0, "remote-mirror: poll_interval_ms must be non-negative")
   assert(options.ssh_connect_timeout >= 1, "remote-mirror: ssh_connect_timeout must be positive")
 
   return options
