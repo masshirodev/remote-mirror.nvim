@@ -1715,6 +1715,60 @@ test("a detached workspace stops polling", function()
   assert_equal(false, (core:schedule_poll()))
 end)
 
+local function buffers_named(name)
+  local found = 0
+  for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_get_name(buffer) == name then
+      found = found + 1
+    end
+  end
+  return found
+end
+
+test("reopening the workspace list replaces the buffer holding its name", function()
+  local manager = {
+    current = nil,
+    list = function()
+      return {}
+    end,
+  }
+  local ui = require("remote-mirror.ui")
+  ui.open(manager)
+  local first = vim.api.nvim_get_current_buf()
+  -- A scratch buffer keeps its name until it is wiped, so a second screen used
+  -- to fail with E95 instead of replacing the first.
+  ui.open(manager)
+  local second = vim.api.nvim_get_current_buf()
+
+  assert(first ~= second, "expected a new buffer")
+  assert_equal(false, vim.api.nvim_buf_is_valid(first))
+  assert_equal(1, buffers_named("remote-mirror://workspaces"))
+  vim.cmd("bwipeout!")
+end)
+
+test("reopening a workspace screen replaces the buffer holding its name", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+    name = "website",
+  })
+  local core = {
+    config = config,
+    state = { data = { files = {}, conflicts = {} } },
+    enqueue = function() end,
+  }
+  local ui = require("remote-mirror.ui")
+  ui.open_workspace({}, core)
+  local first = vim.api.nvim_get_current_buf()
+  ui.open_workspace({}, core)
+
+  assert(first ~= vim.api.nvim_get_current_buf(), "expected a new buffer")
+  assert_equal(false, vim.api.nvim_buf_is_valid(first))
+  assert_equal(1, buffers_named("remote-mirror://workspace/website"))
+  vim.cmd("bwipeout!")
+end)
+
 for _, item in ipairs(tests) do
   local ok, err = pcall(item.callback)
   if ok then

@@ -3,6 +3,26 @@ local util = require("remote-mirror.util")
 
 local M = {}
 
+-- Screens reopen themselves in place after an operation, and a scratch buffer
+-- keeps its name until it is wiped, so claiming a name a live buffer still
+-- holds fails outright. The previous screen is removed before the new one
+-- takes its name.
+local function open_screen(name, filetype)
+  for _, existing in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_get_name(existing) == name then
+      vim.api.nvim_buf_delete(existing, { force = true })
+    end
+  end
+
+  local buffer = vim.api.nvim_create_buf(false, true)
+  vim.bo[buffer].buftype = "nofile"
+  vim.bo[buffer].bufhidden = "wipe"
+  vim.bo[buffer].swapfile = false
+  vim.bo[buffer].filetype = filetype
+  vim.api.nvim_buf_set_name(buffer, name)
+  return buffer
+end
+
 -- Pasted values often carry surrounding whitespace, which the stricter
 -- configuration checks would otherwise reject.
 local function prompt(label, callback)
@@ -136,12 +156,7 @@ local function open_ignore_editor(manager, definition, password, stats, reopen)
     end
   end
 
-  local buffer = vim.api.nvim_create_buf(false, true)
-  vim.bo[buffer].buftype = "nofile"
-  vim.bo[buffer].bufhidden = "wipe"
-  vim.bo[buffer].swapfile = false
-  vim.bo[buffer].filetype = "gitignore"
-  vim.api.nvim_buf_set_name(buffer, "remote-mirror://ignore/" .. definition.name)
+  local buffer = open_screen("remote-mirror://ignore/" .. definition.name, "gitignore")
   vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
   vim.api.nvim_set_current_buf(buffer)
   vim.api.nvim_win_set_cursor(0, { math.min(cursor_line, #lines), 0 })
@@ -173,12 +188,7 @@ local function join_remote(directory, name)
 end
 
 local function open_remote_browser(manager, workspace, password, on_select, on_cancel)
-  local buffer = vim.api.nvim_create_buf(false, true)
-  vim.bo[buffer].buftype = "nofile"
-  vim.bo[buffer].bufhidden = "wipe"
-  vim.bo[buffer].swapfile = false
-  vim.bo[buffer].filetype = "remote-mirror-browser"
-  vim.api.nvim_buf_set_name(buffer, "remote-mirror://browse/" .. workspace.name)
+  local buffer = open_screen("remote-mirror://browse/" .. workspace.name, "remote-mirror-browser")
   vim.api.nvim_set_current_buf(buffer)
 
   local state = { path = nil, entries = {}, visible = {}, hidden = false, loading = false }
@@ -415,12 +425,7 @@ local function open_reconcile_editor(manager, workspace, reviewing, on_connected
     table.insert(lines, "# No differences. Apply to connect without transferring files.")
   end
 
-  local buffer = vim.api.nvim_create_buf(false, true)
-  vim.bo[buffer].buftype = "nofile"
-  vim.bo[buffer].bufhidden = "wipe"
-  vim.bo[buffer].swapfile = false
-  vim.bo[buffer].filetype = "remote-mirror-review"
-  vim.api.nvim_buf_set_name(buffer, "remote-mirror://review/" .. workspace.name)
+  local buffer = open_screen("remote-mirror://review/" .. workspace.name, "remote-mirror-review")
   vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
   vim.api.nvim_set_current_buf(buffer)
   vim.api.nvim_win_set_cursor(0, { math.min(7, #lines), 0 })
@@ -430,7 +435,9 @@ local function open_reconcile_editor(manager, workspace, reviewing, on_connected
     buffer = buffer,
     once = true,
     callback = function()
-      if not applying then
+      -- Reopening the screen wipes the previous buffer, which must not cancel
+      -- the review that replaced the one this buffer was showing.
+      if not applying and manager.reviewing == reviewing then
         manager:cancel_review()
       end
     end,
@@ -532,12 +539,7 @@ function M.open(manager)
     table.insert(lines, "  No workspaces yet. Press a to add one.")
   end
 
-  local buffer = vim.api.nvim_create_buf(false, true)
-  vim.bo[buffer].buftype = "nofile"
-  vim.bo[buffer].bufhidden = "wipe"
-  vim.bo[buffer].swapfile = false
-  vim.bo[buffer].filetype = "remote-mirror"
-  vim.api.nvim_buf_set_name(buffer, "remote-mirror://workspaces")
+  local buffer = open_screen("remote-mirror://workspaces", "remote-mirror")
   vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
   vim.bo[buffer].modifiable = false
   vim.api.nvim_set_current_buf(buffer)
@@ -749,12 +751,7 @@ function M.open_workspace(manager, core)
     table.insert(lines, "  This workspace has no files.")
   end
 
-  local buffer = vim.api.nvim_create_buf(false, true)
-  vim.bo[buffer].buftype = "nofile"
-  vim.bo[buffer].bufhidden = "wipe"
-  vim.bo[buffer].swapfile = false
-  vim.bo[buffer].filetype = "remote-mirror"
-  vim.api.nvim_buf_set_name(buffer, "remote-mirror://workspace/" .. core.config.name)
+  local buffer = open_screen("remote-mirror://workspace/" .. core.config.name, "remote-mirror")
   vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
   vim.bo[buffer].modifiable = false
   vim.api.nvim_set_current_buf(buffer)
