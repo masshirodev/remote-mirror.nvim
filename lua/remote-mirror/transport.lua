@@ -143,7 +143,10 @@ cd %s
       manifest[path] = {
         size = tonumber(size),
         mtime = tonumber(mtime),
-        signature = size .. ":" .. mtime,
+        -- `find -printf %T@` carries a fraction that `stat -c %Y` does not, so
+        -- signatures are truncated to whole seconds and stay comparable
+        -- whichever command observed the file.
+        signature = util.signature(size, mtime),
       }
     end
   end
@@ -221,7 +224,7 @@ fi
     hash = hash,
     size = tonumber(size),
     mtime = tonumber(mtime),
-    signature = size .. ":" .. mtime,
+    signature = util.signature(size, mtime),
   }
 end
 

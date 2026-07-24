@@ -211,7 +211,7 @@ test("parses a remote manifest", function()
     ["src/main.lua"] = {
       size = 42,
       mtime = 1700000000,
-      signature = "42:1700000000.0000000000",
+      signature = "42:1700000000",
     },
   }, transport:manifest())
 end)
@@ -231,9 +231,13 @@ test("builds a manifest with the real remote shell command", function()
     assert_equal(0, result.code)
     return result
   end
-  local manifest = require("remote-mirror.transport").new(config, runner):manifest()
+  local transport = require("remote-mirror.transport").new(config, runner)
+  local manifest = transport:manifest()
   assert_equal(12, manifest["src/main.lua"].size)
-  assert(manifest["src/main.lua"].signature:match("^12:%d+%.%d+$"))
+  assert(manifest["src/main.lua"].signature:match("^12:%d+$"))
+  -- A pushed file records the signature `inspect` saw while a refresh records
+  -- the one `manifest` saw, so the two commands must agree about the same file.
+  assert_equal(manifest["src/main.lua"].signature, transport:inspect("src/main.lua").signature)
 end)
 
 test("hashes only a specifically inspected remote file", function()
@@ -1445,6 +1449,123 @@ test("records a conflict when both sides create the same path", function()
   local core = require("remote-mirror.core").new(config, { transport = transport })
   core:refresh()
   assert_equal("both_created", core.state.data.conflicts["same.txt"].kind)
+end)
+
+test("signatures ignore the fraction that only find reports", function()
+  local util = require("remote-mirror.util")
+  assert_equal("12:1700000000", util.signature("12", "1700000000.0000000000"))
+  assert_equal("12:1700000000", util.signature(12, 1700000000))
+  assert_equal("12:1700000000", util.signature("12", "1700000000.9999999999"))
+end)
+
+test("reports remote observations as file status", function()
+  local State = require("remote-mirror.state")
+  assert_equal("clean", State.file_status({
+    materialized = true,
+    remote_signature = "4:1",
+    observed_remote_signature = "4:1",
+  }))
+  assert_equal("remote_changed", State.file_status({
+    materialized = true,
+    remote_signature = "4:1",
+    observed_remote_signature = "9:2",
+  }))
+  assert_equal("remote_deleted", State.file_status({
+    materialized = true,
+    remote_signature = "4:1",
+    observed_remote_signature = vim.NIL,
+  }))
+  assert_equal("absent", State.file_status({
+    materialized = false,
+    remote_signature = "4:1",
+    observed_remote_signature = "4:1",
+  }))
+  assert_equal("conflict", State.file_status({
+    materialized = true,
+    remote_signature = "4:1",
+    observed_remote_signature = "4:1",
+  }, { kind = "remote_modified" }))
+end)
+
+test("adopts entries recorded before observations existed", function()
+  local State = require("remote-mirror.state")
+  assert_equal("clean", State.file_status({ materialized = true, remote_signature = "4:1" }))
+end)
+
+test("reloads unmodified mirror buffers and reports modified ones", function()
+  local util = require("remote-mirror.util")
+  local root = vim.fn.tempname()
+  util.ensure_dir(root)
+  util.write_file(util.join(root, "clean.txt"), "before\n")
+  util.write_file(util.join(root, "dirty.txt"), "before\n")
+  util.write_file(util.join(root, "untouched.txt"), "before\n")
+
+  for _, name in ipairs({ "clean.txt", "dirty.txt", "untouched.txt" }) do
+    vim.cmd.edit(vim.fn.fnameescape(util.join(root, name)))
+  end
+  vim.cmd.edit(vim.fn.fnameescape(util.join(root, "dirty.txt")))
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "unsaved" })
+
+  util.write_file(util.join(root, "clean.txt"), "after\n")
+  util.write_file(util.join(root, "dirty.txt"), "after\n")
+  util.write_file(util.join(root, "untouched.txt"), "after\n")
+
+  local stale = util.reload_buffers(root, { "clean.txt", "dirty.txt" })
+  assert_equal({ "dirty.txt" }, stale)
+
+  local function buffer_lines(name)
+    local buffer = vim.fn.bufnr(util.join(root, name))
+    return vim.api.nvim_buf_get_lines(buffer, 0, -1, false)
+  end
+  assert_equal({ "after" }, buffer_lines("clean.txt"))
+  assert_equal({ "unsaved" }, buffer_lines("dirty.txt"))
+  -- Paths outside the requested set keep whatever the buffer already held.
+  assert_equal({ "before" }, buffer_lines("untouched.txt"))
+
+  for _, name in ipairs({ "clean.txt", "dirty.txt", "untouched.txt" }) do
+    vim.cmd(("bwipeout! %d"):format(vim.fn.bufnr(util.join(root, name))))
+  end
+end)
+
+test("reloads buffers rewritten by a pull", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+  })
+  local util = require("remote-mirror.util")
+  util.ensure_dir(config.source_root)
+  local absolute = util.join(config.source_root, "main.lua")
+  util.write_file(absolute, "before\n")
+  vim.cmd.edit(vim.fn.fnameescape(absolute))
+  local buffer = vim.fn.bufnr(absolute)
+
+  local transport = {
+    manifest = function()
+      return { ["main.lua"] = { signature = "6:1700000000", size = 6, mtime = 1700000000 } }
+    end,
+    remote_ignore = function()
+      return ""
+    end,
+    pull = function()
+      util.write_file(absolute, "after\n")
+    end,
+    inspect = function()
+      return nil
+    end,
+  }
+  local core = require("remote-mirror.core").new(config, { transport = transport })
+  core.state.data.files["main.lua"] = {
+    remote_hash = util.hash_file(absolute),
+    remote_signature = "6:1700000000",
+    observed_remote_signature = "6:1700000000",
+    local_hash = util.hash_file(absolute),
+    materialized = true,
+  }
+  core:pull()
+
+  assert_equal({ "after" }, vim.api.nvim_buf_get_lines(buffer, 0, -1, false))
+  vim.cmd(("bwipeout! %d"):format(buffer))
 end)
 
 for _, item in ipairs(tests) do

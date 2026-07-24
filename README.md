@@ -218,9 +218,19 @@ password authentication is limited to one prompt.
 
 ## Workspace screen
 
-The workspace screen lists the complete remote manifest. `↓` marks a file that
-has not been materialized locally. Pressing Enter downloads it before opening
-it.
+The workspace screen lists the complete remote manifest. Pressing Enter on a
+file that has not been materialized locally downloads it before opening it.
+
+| Marker | Meaning |
+| --- | --- |
+| `↓` | Not downloaded yet |
+| `~` | Changed on the remote since the last transfer |
+| `x` | Deleted on the remote since the last transfer |
+| `!` | Conflict recorded |
+
+`~` and `x` come from the last refresh or poll, which observe the remote
+without advancing the transfer baseline, so a file stays marked until a pull,
+push, or resolution reconciles it.
 
 | Key | Action |
 | --- | --- |
@@ -268,6 +278,16 @@ flight, so a transfer is never abandoned halfway. Use
 `:RemoteMirrorDisconnect!` to leave anyway; queued operations are cancelled and
 debounced uploads that had not started yet are discarded, which is reported in
 the confirmation message. An operation that is already running still finishes.
+
+## Open buffers
+
+Pulls, lazy downloads, and conflict resolutions rewrite files that may already
+be open. Those buffers are reloaded so their contents match the mirror, without
+depending on `'autoread'`.
+
+A buffer with unsaved changes is never reloaded, because its text is the only
+copy of that work. Those paths are named in a warning instead, leaving the
+choice between saving over the pulled file and discarding the buffer.
 
 ## Local file watching
 

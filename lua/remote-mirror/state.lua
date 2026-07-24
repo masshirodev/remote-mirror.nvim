@@ -57,6 +57,30 @@ function M:save()
   util.write_file(self.path, vim.json.encode(self.data))
 end
 
+-- Refreshes record what the remote looks like now without advancing the
+-- transfer baseline, so the difference between the two is what the workspace
+-- screen reports. Entries written before observations were recorded compare
+-- equal and stay clean.
+function M.file_status(entry, conflict)
+  if conflict then
+    return "conflict"
+  end
+  if not entry then
+    return "clean"
+  end
+  local observed = entry.observed_remote_signature
+  if observed ~= nil and observed ~= entry.remote_signature then
+    if observed == vim.NIL then
+      return "remote_deleted"
+    end
+    return "remote_changed"
+  end
+  if not entry.materialized then
+    return "absent"
+  end
+  return "clean"
+end
+
 function M:add_conflict(path, kind, local_hash, remote_hash, base_hash)
   self.data.conflicts[path] = {
     kind = kind,

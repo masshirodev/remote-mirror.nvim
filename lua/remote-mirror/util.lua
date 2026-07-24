@@ -126,6 +126,49 @@ function M.walk_directories(root)
   return directories
 end
 
+-- Transfers rewrite files underneath open buffers, and Neovim only notices an
+-- external write on its own when 'autoread' is set, so the mirror reloads its
+-- own buffers. A modified buffer is never touched: its unsaved text is the only
+-- copy of the user's work, so it is reported instead.
+function M.reload_buffers(source_root, paths)
+  local wanted
+  if paths then
+    wanted = {}
+    for _, path in ipairs(paths) do
+      wanted[M.join(source_root, path)] = true
+    end
+  end
+
+  local stale = {}
+  for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(buffer) and vim.bo[buffer].buftype == "" then
+      local name = vim.api.nvim_buf_get_name(buffer)
+      local absolute = name ~= "" and vim.fs.normalize(name) or nil
+      local relative = absolute and M.relative_path(source_root, absolute) or nil
+      if relative and relative ~= "" and (not wanted or wanted[absolute]) then
+        if vim.bo[buffer].modified then
+          table.insert(stale, relative)
+        else
+          pcall(vim.api.nvim_buf_call, buffer, function()
+            vim.cmd.edit({ mods = { emsg_silent = true } })
+          end)
+        end
+      end
+    end
+  end
+
+  table.sort(stale)
+  return stale
+end
+
+-- The fraction is cut before any number conversion: `1700000000.9999999999`
+-- does not survive a double intact and would otherwise round up to a second
+-- that `stat -c %Y` never reports.
+function M.signature(size, mtime)
+  local seconds = tostring(mtime):match("^(%-?%d+)") or "0"
+  return ("%d:%d"):format(tonumber(size) or 0, tonumber(seconds))
+end
+
 function M.shell_quote(value)
   return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
 end

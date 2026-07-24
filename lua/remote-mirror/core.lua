@@ -57,6 +57,24 @@ function M:_drain_operations()
   end)
 end
 
+-- `paths` is nil when an operation rewrote enough of the mirror that tracking
+-- individual files buys nothing; every loaded mirror buffer is reloaded then.
+function M:_reload_buffers(paths)
+  if paths and #paths == 0 then
+    return
+  end
+  local stale = util.reload_buffers(self.config.source_root, paths)
+  if #stale > 0 then
+    util.notify(
+      ("%d open buffer(s) have unsaved changes and were not reloaded: %s"):format(
+        #stale,
+        table.concat(stale, ", ")
+      ),
+      vim.log.levels.WARN
+    )
+  end
+end
+
 function M:ensure_layout()
   util.ensure_dir(self.config.source_root)
   util.ensure_dir(self.config.state_root)
@@ -181,6 +199,20 @@ function M:pull()
   if self.watcher then
     self.watcher:resnapshot()
   end
+
+  local touched = {}
+  for path, hash in pairs(local_after) do
+    if snapshot.local_files[path] ~= hash then
+      table.insert(touched, path)
+    end
+  end
+  for path in pairs(snapshot.local_files) do
+    if local_after[path] == nil then
+      table.insert(touched, path)
+    end
+  end
+  self:_reload_buffers(touched)
+
   return { protected = protected, files = vim.tbl_count(snapshot.remote) }
 end
 
@@ -220,6 +252,7 @@ function M:force_pull()
   if self.watcher then
     self.watcher:resnapshot()
   end
+  self:_reload_buffers()
   return { files = vim.tbl_count(remote) }
 end
 
@@ -340,6 +373,7 @@ function M:apply_reconcile(plan, actions)
   self.state.data.conflicts = {}
 
   local applied, skipped, conflicts = 0, 0, 0
+  local touched = {}
   for path, action in pairs(actions) do
     local change = assert(by_path[path], "remote-mirror: reviewed path is no longer available")
     assert(action == "pull" or action == "push" or action == "skip", "remote-mirror: invalid review action")
@@ -377,6 +411,7 @@ function M:apply_reconcile(plan, actions)
         self.state.data.files[path] = nil
       end
       self.state:clear_conflict(path)
+      table.insert(touched, path)
       applied = applied + 1
     else
       local ok = self:push_file(path, true, change.remote_hash, true)
@@ -389,6 +424,10 @@ function M:apply_reconcile(plan, actions)
   end
 
   self.state:save()
+  if self.watcher then
+    self.watcher:resnapshot()
+  end
+  self:_reload_buffers(touched)
   return { applied = applied, skipped = skipped, conflicts = conflicts }
 end
 
@@ -444,6 +483,10 @@ function M:resolve(path, strategy)
     end
     self.state:clear_conflict(path)
     self.state:save()
+    if self.watcher then
+      self.watcher:resnapshot()
+    end
+    self:_reload_buffers({ path })
   else
     error("remote-mirror: strategy must be pull or push")
   end
@@ -462,6 +505,7 @@ function M:materialize(path)
     if self.watcher then
       self.watcher:resnapshot()
     end
+    self:_reload_buffers({ path })
   end
   return util.join(self.config.source_root, path)
 end

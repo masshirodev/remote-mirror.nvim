@@ -1,3 +1,4 @@
+local State = require("remote-mirror.state")
 local util = require("remote-mirror.util")
 
 local M = {}
@@ -715,6 +716,14 @@ function M.open(manager)
   vim.keymap.set("n", "q", "<Cmd>bdelete<CR>", { buffer = buffer, nowait = true })
 end
 
+local status_markers = {
+  conflict = "!",
+  remote_changed = "~",
+  remote_deleted = "x",
+  absent = "↓",
+  clean = " ",
+}
+
 function M.open_workspace(manager, core)
   local paths = vim.tbl_keys(core.state.data.files)
   table.sort(paths)
@@ -729,11 +738,12 @@ function M.open_workspace(manager, core)
     ),
     "",
     "Enter  open file    c  workspaces    p  pull    P  push    r  refresh",
+    "↓ not downloaded    ~ changed on remote    x deleted on remote    ! conflict",
     "",
   }
   for _, path in ipairs(paths) do
-    local entry = core.state.data.files[path]
-    table.insert(lines, ("%s %s"):format(entry.materialized and " " or "↓", path))
+    local status = State.file_status(core.state.data.files[path], core.state.data.conflicts[path])
+    table.insert(lines, ("%s %s"):format(status_markers[status], path))
   end
   if #paths == 0 then
     table.insert(lines, "  This workspace has no files.")
@@ -748,10 +758,10 @@ function M.open_workspace(manager, core)
   vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
   vim.bo[buffer].modifiable = false
   vim.api.nvim_set_current_buf(buffer)
-  vim.api.nvim_win_set_cursor(0, { math.min(6, #lines), 0 })
+  vim.api.nvim_win_set_cursor(0, { math.min(7, #lines), 0 })
 
   local function selected_path()
-    return paths[vim.api.nvim_win_get_cursor(0)[1] - 5]
+    return paths[vim.api.nvim_win_get_cursor(0)[1] - 6]
   end
 
   local function run_and_reopen(operation, success_message)
