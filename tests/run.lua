@@ -1769,6 +1769,84 @@ test("reopening a workspace screen replaces the buffer holding its name", functi
   vim.cmd("bwipeout!")
 end)
 
+local function ignore_editor_fixture(existing)
+  local written = {}
+  local manager = {
+    current = nil,
+    credentials = { website = nil },
+    list = function()
+      return {}
+    end,
+    workspace_options = function(_, workspace)
+      return require("remote-mirror.config").normalize(
+        vim.tbl_extend("force", { mirror_root = vim.fn.tempname() }, workspace)
+      )
+    end,
+    remote_ignore_at_async = function(_, _, _, path, callback)
+      callback(true, {
+        exists = existing ~= nil,
+        contents = existing or "",
+        path = path,
+      })
+    end,
+    write_remote_ignore_at_async = function(_, _, _, path, contents, callback)
+      written.path = path
+      written.contents = contents
+      callback(true)
+    end,
+  }
+  return manager, written
+end
+
+test("editing rules from the browser seeds defaults and writes without guidance", function()
+  local manager, written = ignore_editor_fixture(nil)
+  local closed = false
+  require("remote-mirror.ui")._open_browser_ignore_editor(
+    manager,
+    { name = "website", host = "server" },
+    nil,
+    "/srv/website",
+    function()
+      closed = true
+    end
+  )
+
+  local buffer = vim.api.nvim_get_current_buf()
+  local lines = vim.api.nvim_buf_get_lines(buffer, 0, -1, false)
+  -- Guidance is visible while editing but must never reach the file.
+  assert_equal(true, lines[1]:find("remote-mirror:", 1, true) ~= nil)
+  assert_contains(lines, "node_modules/")
+
+  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-s>", true, false, true), "x", false)
+  assert_equal("/srv/website", written.path)
+  assert_equal(true, closed)
+  for _, line in ipairs(vim.split(written.contents, "\n", { plain = true })) do
+    assert(
+      line:sub(1, #"# remote-mirror:") ~= "# remote-mirror:",
+      "guidance leaked into the file: " .. line
+    )
+  end
+  assert_contains(vim.split(written.contents, "\n", { plain = true }), "node_modules/")
+  vim.cmd("bwipeout!")
+end)
+
+test("editing existing rules round-trips their own comments", function()
+  local existing = "# my own note\nstorage/\n!storage/keep.txt\n"
+  local manager, written = ignore_editor_fixture(existing)
+  require("remote-mirror.ui")._open_browser_ignore_editor(
+    manager,
+    { name = "website", host = "server" },
+    nil,
+    "/srv/website",
+    function() end
+  )
+
+  vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<C-s>", true, false, true), "x", false)
+  -- A second round trip must produce the same file, not a growing header.
+  assert_equal(existing, written.contents)
+  vim.cmd("bwipeout!")
+end)
+
 for _, item in ipairs(tests) do
   local ok, err = pcall(item.callback)
   if ok then

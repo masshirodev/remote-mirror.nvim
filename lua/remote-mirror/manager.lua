@@ -394,29 +394,59 @@ function M:cancel_review()
   self.connecting = false
 end
 
--- The remote root is what the caller is browsing for, so a placeholder keeps
--- configuration normalization happy until a directory is picked.
-function M:browse_remote_async(workspace, password, path, callback)
+-- Browsing happens before a project root exists, so the caller supplies the
+-- root the transport should act on instead of the workspace carrying one.
+function M:browsing_transport(workspace, password, remote_root)
   local definition = vim.tbl_extend("force", {}, workspace)
-  definition.remote_root = "/"
+  definition.remote_root = remote_root
   local ok, config = pcall(self.workspace_options, self, definition)
   if not ok then
-    callback(false, config)
-    return
+    return nil, config
   end
   local resolved = self:resolve_ssh(config.host, config.ssh_command)
   config.ssh_config_file = config.ssh_config_file or resolved.config_file
   if config.auth == "password" then
     config._password = password
     if not config._password or config._password == "" then
-      callback(false, "remote-mirror: password is required")
-      return
+      return nil, "remote-mirror: password is required"
     end
   end
+  return Transport.new(config, require("remote-mirror.async").runner), config
+end
 
-  local transport = Transport.new(config, require("remote-mirror.async").runner)
+function M:browse_remote_async(workspace, password, path, callback)
+  local transport, err = self:browsing_transport(workspace, password, "/")
+  if not transport then
+    callback(false, err)
+    return
+  end
   require("remote-mirror.async").run(function()
     return transport:list_directory(path)
+  end, callback)
+end
+
+-- `.remoteignore` belongs to a project root, and while browsing the directory
+-- on screen is the candidate root, so its own file is the one being edited.
+function M:remote_ignore_at_async(workspace, password, path, callback)
+  local transport, err = self:browsing_transport(workspace, password, path)
+  if not transport then
+    callback(false, err)
+    return
+  end
+  require("remote-mirror.async").run(function()
+    return transport:remote_ignore_info()
+  end, callback)
+end
+
+function M:write_remote_ignore_at_async(workspace, password, path, contents, callback)
+  local transport, err = self:browsing_transport(workspace, password, path)
+  if not transport then
+    callback(false, err)
+    return
+  end
+  require("remote-mirror.async").run(function()
+    transport:write_remote_ignore(contents)
+    return true
   end, callback)
 end
 

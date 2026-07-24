@@ -87,9 +87,18 @@ full path is still possible with `i`.
 | `-` | Go to the parent directory |
 | `.` | Use the current directory as the project root |
 | `i` | Type a remote path and go there |
+| `e` | Edit the current directory's `.remoteignore` |
 | `H` | Show or hide dotfiles |
 | `r` | List the current directory again |
 | `q` | Cancel and return to the connection screen |
+
+`e` edits the `.remoteignore` belonging to the directory on screen, which is
+useful while the listing shows which directories are worth excluding. Saving
+writes that file on the remote host and returns to the browser in the same
+directory, so a root selected afterwards is inspected with the rules already in
+place. Nothing about the workspace is decided there, and abandoning the browser
+leaves a written `.remoteignore` behind, because it belongs to the remote
+project rather than to the registration.
 
 Listings are read over the same SSH connection the workspace will use, so an
 unreachable host, a wrong password, or an unreadable directory is reported
@@ -109,7 +118,8 @@ manifest.
 The form resolves defaults with `ssh -G`, so aliases, `Include` files, `User`,
 `Port`, and identity settings from `~/.ssh/config` are honored. A blank port or
 user keeps SSH configuration in control; without a configured port, SSH uses
-`22`. Press `e` on an existing workspace to edit its connection.
+`22`. Press `e` on an existing workspace to edit its connection, or `i` to edit
+its `.remoteignore` on the remote host.
 
 If OpenSSH rejects a misowned system configuration, discovery retries with
 `~/.ssh/config` explicitly. When no user config exists, it uses `/dev/null` to
@@ -356,6 +366,21 @@ target/
 ```
 
 Ignored paths stay in the workspace manifest and download lazily when opened.
+
+`.remoteignore` can be edited at any point, not only when a workspace is first
+added: press `e` while browsing for a project root, or `i` on a registered
+workspace in the connection screen. Both open the same editor, seeded with the
+existing file when there is one and with the built-in defaults when there is
+not. `<leader>s` or `Ctrl-S` writes it; `q` leaves without writing.
+
+The editor's own instructions are the lines beginning `# remote-mirror:`, and
+they are stripped before the file is written, so editing the same file
+repeatedly does not accumulate a header. Every other line is preserved as
+written, including comments of your own.
+
+Editing a password-authenticated workspace this way needs its session password,
+which is entered by connecting or by pressing `e` on the connection screen
+first.
 
 The preflight measures every directory while it sizes the workspace, so the
 rules screen also lists the heaviest directories that neither the built-in
