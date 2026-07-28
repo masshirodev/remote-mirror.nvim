@@ -167,6 +167,28 @@ require("remote-mirror").setup({
 })
 ```
 
+If the remote project is owned by root or another service account, use rsync
+with passwordless sudo explicitly:
+
+```lua
+require("remote-mirror").setup({
+  workspaces = {
+    {
+      name = "website",
+      host = "my-server",
+      remote_root = "/srv/website",
+      transfer = "rsync",
+      remote_sudo = true,
+    },
+  },
+})
+```
+
+The interactive connection screen asks whether to enable this setting. It uses
+`sudo -n`, so the remote user must already have a matching noninteractive sudo
+rule; remote-mirror will never wait for or store a remote sudo password. SCP
+cannot use this mode and is rejected during configuration.
+
 `transfer` defaults to `"rsync"` and can be set to `"scp"` globally or per
 workspace. SCP keeps ignore, deletion, review, and conflict semantics, but bulk
 operations transfer included files individually and are therefore slower on

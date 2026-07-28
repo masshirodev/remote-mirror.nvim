@@ -74,13 +74,27 @@ local function prompt_connection(manager, workspace, callback)
         if choice == nil or choice == "Cancel" then
           return
         end
-        callback({
-          user = user ~= "" and user or nil,
-          port = port ~= "" and port or nil,
-          auth = password ~= "" and "password" or "ssh",
-          transfer = choice:match("^SCP") and "scp" or "rsync",
-          ssh_config_file = resolved.config_file,
-        }, password)
+        local transfer = choice:match("^SCP") and "scp" or "rsync"
+        local sudo_choices = transfer == "rsync" and {
+          "Use remote sudo (passwordless sudo -n)",
+          "Do not use remote sudo",
+          "Cancel",
+        } or { "Do not use remote sudo", "Cancel" }
+        vim.ui.select(sudo_choices, {
+          prompt = "Remote workspace permissions:",
+        }, function(sudo_choice)
+          if sudo_choice == nil or sudo_choice == "Cancel" then
+            return
+          end
+          callback({
+            user = user ~= "" and user or nil,
+            port = port ~= "" and port or nil,
+            auth = password ~= "" and "password" or "ssh",
+            transfer = transfer,
+            remote_sudo = sudo_choice:match("^Use") ~= nil,
+            ssh_config_file = resolved.config_file,
+          }, password)
+        end)
       end)
     end)
   end)

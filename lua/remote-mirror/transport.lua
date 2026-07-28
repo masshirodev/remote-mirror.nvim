@@ -101,6 +101,9 @@ end
 
 function M:ssh(remote_command, options)
   local command = self:ssh_arguments()
+  if self.config.remote_sudo then
+    remote_command = "sudo -n sh -c " .. util.shell_quote(remote_command)
+  end
   vim.list_extend(command, { self.config.host, remote_command })
   return self.run(command, self:process_options(options))
 end
@@ -123,6 +126,13 @@ end
 function M:rsync_shell()
   local arguments = self:ssh_arguments()
   return table.concat(arguments, " ")
+end
+
+function M:rsync_remote_path()
+  if self.config.remote_sudo then
+    return "sudo -n " .. self.config.rsync_command
+  end
+  return self.config.rsync_command
 end
 
 function M:manifest()
@@ -338,6 +348,7 @@ function M:estimate(filter_path, remote_contents)
     "--out-format=",
     "--protect-args",
     "--rsh=" .. self:rsync_shell(),
+    "--rsync-path=" .. self:rsync_remote_path(),
     "--filter=merge " .. filter_path,
     self:remote_spec(self.config.remote_root .. "/"),
     destination .. "/",
@@ -413,6 +424,7 @@ function M:pull(filter_path, protected)
   vim.list_extend(command, {
     "--protect-args",
     "--rsh=" .. self:rsync_shell(),
+    "--rsync-path=" .. self:rsync_remote_path(),
     "--delete",
     "--filter=merge " .. filter_path,
     self:remote_spec(self.config.remote_root .. "/"),
@@ -430,6 +442,7 @@ function M:push(filter_path)
   vim.list_extend(command, {
     "--protect-args",
     "--rsh=" .. self:rsync_shell(),
+    "--rsync-path=" .. self:rsync_remote_path(),
     "--delete",
     "--filter=merge " .. filter_path,
     self.config.source_root .. "/",
@@ -448,6 +461,7 @@ function M:changes(filter_path)
   vim.list_extend(command, {
     "--protect-args",
     "--rsh=" .. self:rsync_shell(),
+    "--rsync-path=" .. self:rsync_remote_path(),
     "--delete",
     "--dry-run",
     "--checksum",
@@ -502,6 +516,7 @@ function M:download(path)
     vim.list_extend(command, {
       "--protect-args",
       "--rsh=" .. self:rsync_shell(),
+      "--rsync-path=" .. self:rsync_remote_path(),
       self:remote_spec(self.config.remote_root .. "/" .. path),
       destination,
     })
@@ -527,6 +542,7 @@ function M:upload(path)
     vim.list_extend(command, {
       "--protect-args",
       "--rsh=" .. self:rsync_shell(),
+      "--rsync-path=" .. self:rsync_remote_path(),
       source,
       self:remote_spec(self.config.remote_root .. "/" .. path),
     })

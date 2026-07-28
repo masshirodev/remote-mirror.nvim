@@ -41,6 +41,26 @@ test("normalizes configuration and workspace paths", function()
   assert_equal(true, config.upload_on_save)
 end)
 
+test("normalizes remote sudo for rsync workspaces", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    remote_sudo = true,
+    mirror_root = "/tmp/remote-mirror-test",
+  })
+  assert_equal(true, config.remote_sudo)
+
+  local scp_ok, scp_err = pcall(require("remote-mirror.config").normalize, {
+    host = "server",
+    remote_root = "/srv/example",
+    transfer = "scp",
+    remote_sudo = true,
+    mirror_root = "/tmp/remote-mirror-test",
+  })
+  assert_equal(false, scp_ok)
+  assert(scp_err:find("requires transfer = rsync", 1, true), scp_err)
+end)
+
 test("reports the rejected value when a user is unusable", function()
   local ok, err = pcall(require("remote-mirror.config").normalize, {
     host = "server",
@@ -460,6 +480,32 @@ test("writes remote ignore rules through stdin", function()
   require("remote-mirror.transport").new(config, runner):write_remote_ignore("uploads/\n")
   assert_equal("uploads/\n", captured.options.stdin)
   assert(captured.command[#captured.command]:find(".remoteignore.remote%-mirror.tmp"))
+end)
+
+test("uses noninteractive sudo for remote shell and rsync writes", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    remote_sudo = true,
+    mirror_root = vim.fn.tempname(),
+  })
+  local commands = {}
+  local runner = function(command)
+    table.insert(commands, command)
+    return { code = 0, stdout = "", stderr = "" }
+  end
+  local transport = require("remote-mirror.transport").new(config, runner)
+  transport:ssh("mkdir -p /srv/example")
+  transport:upload("main.lua")
+  assert(commands[1][#commands[1]]:find("sudo %-n sh %-c", 1, false), commands[1][#commands[1]])
+  local rsync_path
+  for _, command in ipairs(commands) do
+    rsync_path = find_prefixed(command, "--rsync-path=")
+    if rsync_path then
+      break
+    end
+  end
+  assert(rsync_path and rsync_path:find("sudo %-n", 1, false), vim.inspect(commands))
 end)
 
 test("parses an rsync dry-run estimate", function()

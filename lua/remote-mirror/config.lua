@@ -11,6 +11,7 @@ local defaults = {
   poll_interval_ms = 0,
   poll_auto_pull = true,
   ssh_connect_timeout = 10,
+  remote_sudo = false,
   ssh_command = "ssh",
   ssh_args = {},
   transfer = "rsync",
@@ -87,6 +88,11 @@ function M.normalize(options)
   assert(
     options.transfer == "rsync" or options.transfer == "scp",
     "remote-mirror: transfer must be rsync or scp"
+  )
+  assert(type(options.remote_sudo) == "boolean", "remote-mirror: remote_sudo must be a boolean")
+  assert(
+    not options.remote_sudo or options.transfer == "rsync",
+    "remote-mirror: remote_sudo requires transfer = rsync; SCP cannot privilege its destination"
   )
   for _, key in ipairs({
     "ssh_command",

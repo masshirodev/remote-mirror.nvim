@@ -15,6 +15,7 @@ local workspace_keys = {
   "port",
   "auth",
   "transfer",
+  "remote_sudo",
   "ssh_config_file",
   "ssh_command",
   "ssh_args",
