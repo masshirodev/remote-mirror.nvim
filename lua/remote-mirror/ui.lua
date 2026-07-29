@@ -34,70 +34,84 @@ local function prompt(label, callback)
   end)
 end
 
-local function prompt_connection(manager, workspace, callback)
-  local resolved = manager:resolve_ssh(workspace.host, workspace.ssh_command)
-  if resolved.error and resolved.error ~= "" then
-    util.notify("could not inspect SSH config; using standard defaults", vim.log.levels.WARN)
-  end
-
-  vim.ui.input({
-    prompt = "SSH port (blank uses SSH config, then 22): ",
-    default = tostring(workspace.port or resolved.port or 22),
-  }, function(port)
-    if port == nil then
-      return
+local function prompt_connection(manager, workspace, callback, edit_host)
+  local function continue_with_host(host)
+    local resolved = manager:resolve_ssh(host, workspace.ssh_command)
+    if resolved.error and resolved.error ~= "" then
+      util.notify("could not inspect SSH config; using standard defaults", vim.log.levels.WARN)
     end
-    port = vim.trim(port)
-    vim.ui.input({
-      prompt = "SSH user (blank uses SSH config): ",
-      default = workspace.user or resolved.user or "",
-    }, function(user)
-      if user == nil then
-        return
-      end
-      user = vim.trim(user)
 
-      local ok, password = pcall(
-        vim.fn.inputsecret,
-        "Password (blank uses SSH config, agent, or identity): "
-      )
-      if not ok then
-        util.notify(password, vim.log.levels.ERROR)
+    vim.ui.input({
+      prompt = "SSH port (blank uses SSH config, then 22): ",
+      default = tostring(workspace.port or resolved.port or 22),
+    }, function(port)
+      if port == nil then
         return
       end
-      local current_transfer = workspace.transfer or "rsync"
-      local preferred = current_transfer == "scp" and "SCP (fallback)" or "rsync (recommended)"
-      local alternate = current_transfer == "scp" and "rsync (recommended)" or "SCP (fallback)"
-      vim.ui.select({ preferred, alternate, "Cancel" }, {
-        prompt = "File transfer method:",
-      }, function(choice)
-        if choice == nil or choice == "Cancel" then
+      port = vim.trim(port)
+      vim.ui.input({
+        prompt = "SSH user (blank uses SSH config): ",
+        default = workspace.user or resolved.user or "",
+      }, function(user)
+        if user == nil then
           return
         end
-        local transfer = choice:match("^SCP") and "scp" or "rsync"
-        local sudo_choices = transfer == "rsync" and {
-          "Use remote sudo (passwordless sudo -n)",
-          "Do not use remote sudo",
-          "Cancel",
-        } or { "Do not use remote sudo", "Cancel" }
-        vim.ui.select(sudo_choices, {
-          prompt = "Remote workspace permissions:",
-        }, function(sudo_choice)
-          if sudo_choice == nil or sudo_choice == "Cancel" then
+        user = vim.trim(user)
+
+        local ok, password = pcall(
+          vim.fn.inputsecret,
+          "Password (blank uses SSH config, agent, or identity): "
+        )
+        if not ok then
+          util.notify(password, vim.log.levels.ERROR)
+          return
+        end
+        local current_transfer = workspace.transfer or "rsync"
+        local preferred = current_transfer == "scp" and "SCP (fallback)" or "rsync (recommended)"
+        local alternate = current_transfer == "scp" and "rsync (recommended)" or "SCP (fallback)"
+        vim.ui.select({ preferred, alternate, "Cancel" }, {
+          prompt = "File transfer method:",
+        }, function(choice)
+          if choice == nil or choice == "Cancel" then
             return
           end
-          callback({
-            user = user ~= "" and user or nil,
-            port = port ~= "" and port or nil,
-            auth = password ~= "" and "password" or "ssh",
-            transfer = transfer,
-            remote_sudo = sudo_choice:match("^Use") ~= nil,
-            ssh_config_file = resolved.config_file,
-          }, password)
+          local transfer = choice:match("^SCP") and "scp" or "rsync"
+          local sudo_choices = transfer == "rsync" and {
+            "Use remote sudo (passwordless sudo -n)",
+            "Do not use remote sudo",
+            "Cancel",
+          } or { "Do not use remote sudo", "Cancel" }
+          vim.ui.select(sudo_choices, {
+            prompt = "Remote workspace permissions:",
+          }, function(sudo_choice)
+            if sudo_choice == nil or sudo_choice == "Cancel" then
+              return
+            end
+            callback({
+              host = host,
+              user = user ~= "" and user or nil,
+              port = port ~= "" and port or nil,
+              auth = password ~= "" and "password" or "ssh",
+              transfer = transfer,
+              remote_sudo = sudo_choice:match("^Use") ~= nil,
+              ssh_config_file = resolved.config_file,
+            }, password)
+          end)
         end)
       end)
     end)
-  end)
+  end
+
+  if edit_host then
+    vim.ui.input({ prompt = "SSH host or alias: ", default = workspace.host }, function(host)
+      host = host and vim.trim(host) or ""
+      if host ~= "" then
+        continue_with_host(host)
+      end
+    end)
+  else
+    continue_with_host(workspace.host)
+  end
 end
 
 local function save_workspace(manager, definition, password, reopen)
@@ -562,6 +576,56 @@ local function add_workspace(manager, reopen)
   end)
 end
 
+-- Changing a host can make the registered root invalid. Keep the old
+-- registration until the new endpoint has a usable directory, and let the
+-- user choose a replacement instead of creating a path or transferring files
+-- implicitly.
+local function edit_workspace_connection(manager, workspace, connection, password, reopen)
+  local candidate = vim.tbl_extend("force", {}, workspace, connection)
+
+  local function save(remote_root)
+    local update = vim.tbl_extend("force", {}, connection, { remote_root = remote_root })
+    local ok, updated = pcall(manager.update_connection, manager, workspace.name, update)
+    if not ok then
+      util.notify(updated, vim.log.levels.ERROR)
+      return
+    end
+    manager:set_password(workspace.name, password)
+    util.notify("updated connection for " .. workspace.name)
+    reopen()
+  end
+
+  util.notify("checking " .. candidate.host .. ":" .. candidate.remote_root)
+  manager:browse_remote_async(candidate, password, candidate.remote_root, function(ok)
+    if ok then
+      save(candidate.remote_root)
+      return
+    end
+
+    vim.ui.select({ "Choose a remote directory", "Cancel" }, {
+      prompt = ("%s does not contain %s. Choose a replacement directory?"):format(
+        candidate.host,
+        candidate.remote_root
+      ),
+    }, function(choice)
+      if choice ~= "Choose a remote directory" then
+        return
+      end
+      open_remote_browser(
+        manager,
+        candidate,
+        password,
+        function(remote_root)
+          save(remote_root)
+        end,
+        function() end,
+        {},
+        nil
+      )
+    end)
+  end)
+end
+
 local function confirm(prompt_text, action, callback)
   vim.ui.select({ action, "Cancel" }, { prompt = prompt_text }, function(choice)
     if choice == action then
@@ -813,15 +877,8 @@ function M.open(manager)
       return
     end
     prompt_connection(manager, workspace, function(connection, password)
-      local ok, updated = pcall(manager.update_connection, manager, workspace.name, connection)
-      if not ok then
-        util.notify(updated, vim.log.levels.ERROR)
-        return
-      end
-      manager:set_password(workspace.name, password)
-      util.notify("updated connection for " .. workspace.name)
-      reopen()
-    end)
+      edit_workspace_connection(manager, workspace, connection, password, reopen)
+    end, true)
   end, { buffer = buffer, nowait = true })
   -- A registered workspace already has its root, so its rules are edited in
   -- place rather than by browsing back to it.
