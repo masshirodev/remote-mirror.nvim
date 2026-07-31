@@ -881,6 +881,23 @@ function M.open(manager)
       end)
     end
 
+    local function prompt_for_hook_password(callback)
+      if not manager:has_remote_command_hook(workspace.name) or manager:has_hook_password(workspace.name) then
+        callback()
+        return
+      end
+      local ok, password = pcall(
+        vim.fn.inputsecret,
+        "Password for onRemoteCommand hook (blank if not needed): "
+      )
+      if not ok then
+        util.notify(password, vim.log.levels.ERROR)
+        return
+      end
+      manager:set_hook_password(workspace.name, password)
+      callback()
+    end
+
     local function choose_strategy()
       if not manager:has_local_mirror(workspace.name) then
         confirm(
@@ -942,7 +959,7 @@ function M.open(manager)
       end
       manager:set_password(workspace.name, password)
     end
-    choose_strategy()
+    prompt_for_hook_password(choose_strategy)
   end
 
   vim.keymap.set("n", "<CR>", connect, { buffer = buffer, nowait = true })

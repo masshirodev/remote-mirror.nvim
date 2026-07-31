@@ -1986,6 +1986,111 @@ test("a draft outlives navigation and reseeds the editor", function()
   vim.cmd("bwipeout!")
 end)
 
+test("workspace hooks wrap remote commands and preserve hook input", function()
+  local mirror_root = vim.fn.tempname()
+  local config = require("remote-mirror.config").normalize({
+    name = "website",
+    host = "server",
+    remote_root = "/srv/website",
+    mirror_root = mirror_root,
+  })
+  require("remote-mirror.util").ensure_dir(mirror_root)
+  require("remote-mirror.util").write_file(
+    config.mirror_root .. "/onRemoteCommand",
+    "exec su -s /bin/sh -c \"$1\" chatwoo001\n"
+  )
+  config._hook_password = "secret"
+
+  local commands, options = {}, nil
+  local transport = require("remote-mirror.transport").new(config, function(command, process_options)
+    commands[#commands + 1] = command
+    options = process_options
+    return { code = 0, stdout = "", stderr = "" }
+  end)
+  transport:ssh("printf ready", { stdin = "payload" })
+
+  assert(commands[1][#commands[1]]:find("onRemoteCommand", 1, true) == nil)
+  assert(commands[1][#commands[1]]:find("su %-s /bin/sh %-c", 1, false))
+  assert(commands[1][#commands[1]]:find("chatwoo001", 1, true))
+  assert_equal("secret\npayload", options.stdin)
+  assert_equal("secret", options.env.REMOTE_MIRROR_HOOK_PASSWORD)
+
+  local shell = transport:rsync_shell()
+  assert(shell:find("remote%-command%-hook%.sh", 1, false))
+  local wrapper = require("remote-mirror.util").read_file(config.state_root .. "/remote-command-hook.sh")
+  assert(wrapper:find("chatwoo001", 1, true))
+  local syntax = vim.system({ "sh", "-n", config.state_root .. "/remote-command-hook.sh" }):wait()
+  assert_equal(0, syntax.code)
+
+  local fake_ssh = vim.fn.tempname()
+  local fake_args = vim.fn.tempname()
+  local fake_stdin = vim.fn.tempname()
+  require("remote-mirror.util").write_file(
+    fake_ssh,
+    "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$REMOTE_MIRROR_TEST_ARGS\"\ncat > \"$REMOTE_MIRROR_TEST_STDIN\"\n"
+  )
+  assert(vim.uv.fs_chmod(fake_ssh, 493))
+  config.ssh_command = fake_ssh
+  local hooked_transport = require("remote-mirror.transport").new(config, function()
+    return { code = 0, stdout = "", stderr = "" }
+  end)
+  local hooked_shell = hooked_transport:rsync_shell()
+  local hooked_wrapper = config.state_root .. "/remote-command-hook.sh"
+  local fake_result = vim.system({
+    hooked_wrapper,
+    "server",
+    "rsync",
+    "--server",
+    "weird ' \" $ ;",
+  }, {
+    stdin = "payload",
+    env = {
+      REMOTE_MIRROR_HOOK_PASSWORD = "p@ss'w!rd",
+      REMOTE_MIRROR_TEST_ARGS = fake_args,
+      REMOTE_MIRROR_TEST_STDIN = fake_stdin,
+    },
+  }):wait()
+  assert_equal(0, fake_result.code)
+  assert(hooked_shell:find("remote%-command%-hook%.sh", 1, false))
+  local captured_args = require("remote-mirror.util").read_file(fake_args)
+  assert(captured_args:find('su %-s /bin/sh %-c "$1" chatwoo001', 1, false), captured_args)
+  assert(captured_args:find("weird", 1, true), captured_args)
+  assert_equal("p@ss'w!rd\npayload", require("remote-mirror.util").read_file(fake_stdin))
+end)
+
+test("workspace command hooks reject SCP", function()
+  local mirror_root = vim.fn.tempname()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/website",
+    mirror_root = mirror_root,
+    transfer = "scp",
+  })
+  require("remote-mirror.util").write_file(config.mirror_root .. "/onRemoteCommand", "exec \"$1\"\n")
+  local ok, err = pcall(require("remote-mirror.transport").new, config, function()
+    return { code = 0, stdout = "", stderr = "" }
+  end)
+  assert_equal(false, ok)
+  assert(err:find("requires transfer = rsync", 1, true), err)
+end)
+
+test("lifecycle hooks run with workspace environment", function()
+  local mirror_root = vim.fn.tempname()
+  local config = require("remote-mirror.config").normalize({
+    name = "website",
+    host = "server",
+    user = "deploy",
+    remote_root = "/srv/website",
+    mirror_root = mirror_root,
+  })
+  require("remote-mirror.util").write_file(
+    config.mirror_root .. "/onConnected",
+    "printf '%s\\n%s\\n%s' \"$REMOTE_MIRROR_WORKSPACE\" \"$REMOTE_MIRROR_USER\" \"$REMOTE_MIRROR_REMOTE_ROOT\" > hook-output\n"
+  )
+  require("remote-mirror.hooks").run(config, "onConnected")
+  assert_equal("website\ndeploy\n/srv/website", require("remote-mirror.util").read_file(config.mirror_root .. "/hook-output"))
+end)
+
 for _, item in ipairs(tests) do
   local ok, err = pcall(item.callback)
   if ok then

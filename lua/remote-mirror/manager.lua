@@ -1,5 +1,6 @@
 local Config = require("remote-mirror.config")
 local Core = require("remote-mirror.core")
+local Hooks = require("remote-mirror.hooks")
 local Ignore = require("remote-mirror.ignore")
 local Registry = require("remote-mirror.registry")
 local Transport = require("remote-mirror.transport")
@@ -46,6 +47,7 @@ function M.new(options)
     current = nil,
     credentials = {},
     sudo_credentials = {},
+    hook_credentials = {},
   }, M)
 
   for _, workspace in ipairs(options.workspaces or {}) do
@@ -69,6 +71,9 @@ function M:workspace_options(workspace)
   end
   if self.sudo_credentials[config.name] then
     config._sudo_password = self.sudo_credentials[config.name]
+  end
+  if self.hook_credentials[config.name] ~= nil then
+    config._hook_password = self.hook_credentials[config.name]
   end
   return config
 end
@@ -105,6 +110,19 @@ function M:set_sudo_password(name, password)
   end
 end
 
+function M:set_hook_password(name, password)
+  self.hook_credentials[name] = password or ""
+end
+
+function M:has_hook_password(name)
+  return self.hook_credentials[name] ~= nil
+end
+
+function M:has_remote_command_hook(name)
+  local workspace = assert(self.registry.workspaces[name], "remote-mirror: unknown workspace " .. name)
+  return Hooks.has(self:workspace_options(workspace), "onRemoteCommand")
+end
+
 function M:has_sudo_password(name)
   return self.sudo_credentials[name] ~= nil
 end
@@ -132,6 +150,7 @@ function M:remove(name)
   end
   self.credentials[name] = nil
   self.sudo_credentials[name] = nil
+  self.hook_credentials[name] = nil
   self.registry:remove(name)
 end
 
@@ -246,6 +265,7 @@ end
 
 function M:_activate(core)
   if self.current then
+    pcall(Hooks.run, self.current.config, "onDisconnected")
     self.current:detach()
   else
     self.previous_cwd = vim.fn.getcwd()
@@ -255,6 +275,17 @@ function M:_activate(core)
   self.current = core
   vim.cmd.cd(vim.fn.fnameescape(core.config.source_root))
   return core
+end
+
+function M:_run_connected_hook(core, callback)
+  Hooks.run_async(core.config, "onConnected", function(ok, result)
+    if not ok then
+      self:_deactivate()
+      callback(false, result)
+      return
+    end
+    callback(true, core)
+  end)
 end
 
 function M:_deactivate()
@@ -291,8 +322,13 @@ function M:disconnect(force)
     )
   end
 
+  local hook_ok, hook_error = pcall(Hooks.run, core.config, "onDisconnected")
   self:_deactivate()
-  return { name = core.config.name, pending = pending }
+  return {
+    name = core.config.name,
+    pending = pending,
+    hook_error = hook_ok and nil or tostring(hook_error),
+  }
 end
 
 function M:connect(name)
@@ -320,6 +356,11 @@ function M:connect(name)
   core:start_poll_timer()
   self.current = core
   vim.cmd.cd(vim.fn.fnameescape(core.config.source_root))
+  local hook_ok, hook_error = pcall(Hooks.run, core.config, "onConnected")
+  if not hook_ok then
+    self:_deactivate()
+    error(hook_error, 0)
+  end
   return core
 end
 
@@ -363,6 +404,8 @@ function M:connect_async(name, strategy, callback)
     self.connecting = false
     if connect_ok then
       self:_activate(result)
+      self:_run_connected_hook(result, callback)
+      return
     end
     callback(connect_ok, result)
   end)
@@ -407,6 +450,10 @@ function M:apply_review_async(actions, callback)
     self.reviewing = nil
     if ok then
       self:_activate(result.core)
+      self:_run_connected_hook(result.core, function(hook_ok, hook_result)
+        callback(hook_ok, hook_ok and { core = hook_result, result = result.result } or hook_result)
+      end)
+      return
     end
     callback(ok, result)
   end)
@@ -543,6 +590,7 @@ end
 function M:stop()
   self:cancel_review()
   if self.current then
+    pcall(Hooks.run, self.current.config, "onDisconnected")
     self.current:detach()
   end
 end

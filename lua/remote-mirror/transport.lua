@@ -1,4 +1,5 @@
 local Ignore = require("remote-mirror.ignore")
+local Hooks = require("remote-mirror.hooks")
 local process = require("remote-mirror.process")
 local util = require("remote-mirror.util")
 
@@ -6,6 +7,12 @@ local M = {}
 M.__index = M
 
 function M.new(config, runner)
+  if Hooks.has(config, "onRemoteCommand") then
+    assert(
+      config.transfer == "rsync",
+      "remote-mirror: onRemoteCommand requires transfer = rsync; SCP has no remote command hook"
+    )
+  end
   return setmetatable({
     config = config,
     run = runner or process.run,
@@ -79,24 +86,41 @@ end
 
 function M:process_options(options)
   options = options or {}
-  if self.config.auth ~= "password" then
-    return options
-  end
-
-  local helper = util.join(self.config.state_root, "askpass.sh")
-  util.write_file(helper, [[#!/bin/sh
+  local hook_via_wrapper = options.remote_command_hook
+  options.remote_command_hook = nil
+  if self.config.auth == "password" then
+    local helper = util.join(self.config.state_root, "askpass.sh")
+    util.write_file(helper, [[#!/bin/sh
 printf '%s\n' "$REMOTE_MIRROR_PASSWORD"
 ]])
-  local ok, err = vim.uv.fs_chmod(helper, 448)
-  assert(ok, ("remote-mirror: could not secure askpass helper: %s"):format(err or "unknown error"))
+    local ok, err = vim.uv.fs_chmod(helper, 448)
+    assert(ok, ("remote-mirror: could not secure askpass helper: %s"):format(err or "unknown error"))
 
-  options.env = vim.tbl_extend("force", options.env or {}, {
-    DISPLAY = vim.env.DISPLAY or ":0",
-    SSH_ASKPASS = helper,
-    SSH_ASKPASS_REQUIRE = "force",
-    REMOTE_MIRROR_PASSWORD = assert(self.config._password, "remote-mirror: password is unavailable"),
-  })
+    options.env = vim.tbl_extend("force", options.env or {}, {
+      DISPLAY = vim.env.DISPLAY or ":0",
+      SSH_ASKPASS = helper,
+      SSH_ASKPASS_REQUIRE = "force",
+      REMOTE_MIRROR_PASSWORD = assert(self.config._password, "remote-mirror: password is unavailable"),
+    })
+  end
+
+  if Hooks.has(self.config, "onRemoteCommand") and self.config._hook_password and self.config._hook_password ~= "" then
+    options.env = vim.tbl_extend("force", options.env or {}, {
+      REMOTE_MIRROR_HOOK_PASSWORD = self.config._hook_password,
+    })
+    if not hook_via_wrapper then
+      options.stdin = self.config._hook_password .. "\n" .. (options.stdin or "")
+    end
+  end
   return options
+end
+
+function M:remote_command(remote_command)
+  local script = Hooks.remote_script(self.config)
+  if not script then
+    return remote_command
+  end
+  return ("sh -c %s -- %s"):format(util.shell_quote(script), util.shell_quote(remote_command))
 end
 
 function M:ssh(remote_command, options)
@@ -116,7 +140,7 @@ end
 
 function M:ssh_raw(remote_command, options)
   local command = self:ssh_arguments()
-  vim.list_extend(command, { self.config.host, remote_command })
+  vim.list_extend(command, { self.config.host, self:remote_command(remote_command) })
   return self.run(command, self:process_options(options))
 end
 
@@ -171,7 +195,52 @@ end
 
 function M:rsync_shell()
   local arguments = self:ssh_arguments()
-  return table.concat(arguments, " ")
+  local script = Hooks.remote_script(self.config)
+  if not script then
+    return table.concat(arguments, " ")
+  end
+
+  util.ensure_dir(self.config.state_root)
+  local wrapper = util.join(self.config.state_root, "remote-command-hook.sh")
+  local quoted_arguments = {}
+  for _, argument in ipairs(arguments) do
+    table.insert(quoted_arguments, util.shell_quote(argument))
+  end
+  local command = table.concat(quoted_arguments, " ")
+  local remote_prefix = util.shell_quote("sh -c " .. util.shell_quote(script) .. " -- ")
+  local body = ([=[#!/bin/sh
+set -eu
+host=$1
+shift
+
+quote() {
+  printf "'"
+  printf "%%s" "$1" | sed "s/'/'\\''/g"
+  printf "'"
+}
+
+remote_command=
+for argument in "$@"; do
+  quoted=$(quote "$argument")
+  if [ -n "$remote_command" ]; then
+    remote_command="$remote_command $quoted"
+  else
+    remote_command=$quoted
+  fi
+done
+
+remote_command_prefix=%s
+remote_command="$remote_command_prefix$remote_command"
+if [ "${REMOTE_MIRROR_HOOK_PASSWORD+x}" = x ]; then
+  { printf '%%s\n' "$REMOTE_MIRROR_HOOK_PASSWORD"; cat; } | exec %s "$host" "$remote_command"
+else
+  exec %s "$host" "$remote_command"
+fi
+]=]):format(remote_prefix, command, command)
+  util.write_file(wrapper, body)
+  local ok, err = vim.uv.fs_chmod(wrapper, 493)
+  assert(ok, ("remote-mirror: could not make remote command hook executable: %s"):format(err or "unknown error"))
+  return util.shell_quote(wrapper)
 end
 
 function M:rsync_remote_path()
@@ -406,6 +475,7 @@ function M:estimate(filter_path, remote_contents)
   })
   local options = self:process_options({
     env = { LC_ALL = "C" },
+    remote_command_hook = true,
   })
   local result = self.run(command, options)
   local size = result.stdout:match("Total file size:%s*([%d,]+)%s+bytes")
@@ -482,7 +552,7 @@ function M:pull(filter_path, protected)
     self:remote_spec(self.config.remote_root .. "/"),
     self.config.source_root .. "/",
   })
-  return self.run(command, self:process_options())
+  return self.run(command, self:process_options({ remote_command_hook = true }))
 end
 
 function M:push(filter_path)
@@ -501,7 +571,7 @@ function M:push(filter_path)
     self.config.source_root .. "/",
     self:remote_spec(self.config.remote_root .. "/"),
   })
-  return self.run(command, self:process_options())
+  return self.run(command, self:process_options({ remote_command_hook = true }))
 end
 
 function M:changes(filter_path)
@@ -525,7 +595,7 @@ function M:changes(filter_path)
     self:remote_spec(self.config.remote_root .. "/"),
     self.config.source_root .. "/",
   })
-  local result = self.run(command, self:process_options())
+  local result = self.run(command, self:process_options({ remote_command_hook = true }))
   local changes = {}
   for line in result.stdout:gmatch("[^\r\n]+") do
     local itemized, path = line:match("^([^\t]+)\t(.+)$")
@@ -576,7 +646,7 @@ function M:download(path)
       destination,
     })
   end
-  return self.run(command, self:process_options())
+  return self.run(command, self:process_options({ remote_command_hook = true }))
 end
 
 function M:upload(path)
@@ -603,7 +673,7 @@ function M:upload(path)
       self:remote_spec(self.config.remote_root .. "/" .. path),
     })
   end
-  return self.run(command, self:process_options())
+  return self.run(command, self:process_options({ remote_command_hook = true }))
 end
 
 function M:delete(path)

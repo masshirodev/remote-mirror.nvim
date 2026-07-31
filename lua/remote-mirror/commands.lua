@@ -49,9 +49,12 @@ function M.register(manager)
         ("disconnected %s; discarded %d pending upload(s)"):format(result.name, result.pending),
         vim.log.levels.WARN
       )
-      return
+    else
+      util.notify("disconnected " .. result.name)
     end
-    util.notify("disconnected " .. result.name)
+    if result.hook_error then
+      util.notify("onDisconnected failed: " .. result.hook_error, vim.log.levels.WARN)
+    end
   end), {
     bang = true,
     desc = "Disconnect the active remote workspace, keeping its mirror on disk",

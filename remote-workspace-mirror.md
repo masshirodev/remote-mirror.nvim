@@ -233,6 +233,20 @@ same reconciliation semantics at the cost of slower bulk operations.
 Supported overrides include local SSH, rsync, and SCP executables and arguments,
 plus GNU-compatible remote `find`, `stat`, `sha256sum`, and `du` executables.
 
+## Workspace hooks
+
+Each local mirror may provide `onConnected`, `onDisconnected`, and
+`onRemoteCommand` files alongside `source/`. The first two are local shell
+hooks, run with the mirror root as their working directory. The remote-command
+hook is embedded in an SSH shell wrapper and receives the original remote
+command as `$1`; the wrapper is also used as rsync's remote shell so manifest,
+transfer, and remote utility commands use the same account.
+
+The remote hook's standard input is preserved. A password entered for the hook
+is kept in memory for the session and sent before the command's own input,
+which supports a shell hook that runs `su <account> -c "$1"`. This is opt-in
+per mirror and requires rsync because SCP cannot replace its remote command.
+
 ## Proposed MVP
 
 1. Configure one SSH host and one remote project root.

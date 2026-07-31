@@ -228,6 +228,40 @@ are kept only in Neovim memory for the active session and are requested again
 after restarting Neovim; they are never written to the workspace registry or
 mirror state.
 
+## Workspace hooks
+
+The mirror root can contain three optional shell hooks alongside `source/`:
+
+```text
+.remote-mirror/<workspace>/
+  source/
+  onConnected
+  onDisconnected
+  onRemoteCommand
+```
+
+`onConnected` and `onDisconnected` run locally with the mirror root as their
+working directory. They receive `REMOTE_MIRROR_WORKSPACE`,
+`REMOTE_MIRROR_HOST`, `REMOTE_MIRROR_USER`, `REMOTE_MIRROR_REMOTE_ROOT`,
+`REMOTE_MIRROR_MIRROR_ROOT`, and `REMOTE_MIRROR_SOURCE_ROOT`.
+
+`onRemoteCommand` is sent to the SSH host as a shell wrapper for every remote
+command, including rsync's server process. The command being wrapped is its
+first argument (`$1`). Its standard input is preserved. This makes it possible
+to connect as a personal account and switch to an application account:
+
+```sh
+#!/bin/sh
+exec su -s /bin/sh -c "$1" chatwoo001
+```
+
+When this hook exists, the connection screen asks once for its password. The
+password is held only in memory and is prepended to the hook's standard input;
+leave it blank for hooks that do not authenticate. Hooks are intentionally
+executed with the same privileges as the user running Neovim, so only create
+them in a mirror you trust. `onRemoteCommand` requires rsync; SCP is rejected
+because SCP has no hook point for replacing its remote command.
+
 The first connection confirms an initial pull. When a local mirror already
 exists, connecting requires one of three explicit strategies:
 
