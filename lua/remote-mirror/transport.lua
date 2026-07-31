@@ -120,6 +120,34 @@ function M:ssh_raw(remote_command, options)
   return self.run(command, self:process_options(options))
 end
 
+function M:ssh_direct(remote_command, options)
+  local sudo = self.config.remote_sudo_auth == "password" and "sudo -S -p '' " or "sudo -n "
+  local process_options = options
+  if self.config.remote_sudo_auth == "password" then
+    process_options = vim.tbl_extend("force", {}, options or {}, {
+      stdin = (self.config._sudo_password or "") .. "\n" .. ((options and options.stdin) or ""),
+    })
+  end
+  return self:ssh_raw(sudo .. remote_command, process_options)
+end
+
+local function shell_sudo_denied(error_message)
+  error_message = tostring(error_message):lower()
+  return error_message:find("not allowed to execute", 1, true) ~= nil
+    and error_message:find("sh %-c", 1, false) ~= nil
+end
+
+function M:ssh_with_direct_fallback(shell_command, direct_command, options)
+  local ok, result = pcall(self.ssh, self, shell_command, options)
+  if ok then
+    return result
+  end
+  if self.config.remote_sudo and direct_command and shell_sudo_denied(result) then
+    return self:ssh_direct(direct_command, options)
+  end
+  error(result, 0)
+end
+
 function M:prepare_rsync()
   if self.config.remote_sudo and self.config.remote_sudo_auth == "password" then
     self:ssh_raw("sudo -S -p '' -v", { stdin = (self.config._sudo_password or "") .. "\n" })
@@ -162,7 +190,11 @@ cd %s
     util.shell_quote(self.config.remote_root),
     util.shell_quote(self.config.remote_find_command)
   )
-  local result = self:ssh(command)
+  local direct_command = ("%s %s -type f -printf \"%%s\\t%%T@\\t%%P\\n\""):format(
+    util.shell_quote(self.config.remote_find_command),
+    util.shell_quote(self.config.remote_root)
+  )
+  local result = self:ssh_with_direct_fallback(command, direct_command)
   local manifest = {}
 
   for line in result.stdout:gmatch("[^\r\n]+") do
