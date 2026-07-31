@@ -107,7 +107,7 @@ function M:ssh(remote_command, options)
     command = sudo .. "sh -c " .. util.shell_quote(remote_command)
     if self.config.remote_sudo_auth == "password" then
       process_options = vim.tbl_extend("force", {}, options or {}, {
-        stdin = self.config._sudo_password .. "\n" .. ((options and options.stdin) or ""),
+        stdin = (self.config._sudo_password or "") .. "\n" .. ((options and options.stdin) or ""),
       })
     end
   end
@@ -122,7 +122,7 @@ end
 
 function M:prepare_rsync()
   if self.config.remote_sudo and self.config.remote_sudo_auth == "password" then
-    self:ssh_raw("sudo -S -p '' -v", { stdin = self.config._sudo_password .. "\n" })
+    self:ssh_raw("sudo -S -p '' -v", { stdin = (self.config._sudo_password or "") .. "\n" })
   end
 end
 

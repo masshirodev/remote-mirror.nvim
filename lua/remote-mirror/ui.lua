@@ -103,7 +103,7 @@ local function prompt_connection(manager, workspace, callback, edit_host)
               ssh_config_file = resolved.config_file,
               }, password, sudo_password)
             end
-            if remote_sudo and remote_sudo_auth == "password" then
+            if remote_sudo and remote_sudo_auth == "password" and not edit_host then
               local sudo_ok, sudo_password = pcall(vim.fn.inputsecret, "Remote sudo password: ")
               if not sudo_ok then
                 util.notify(sudo_password, vim.log.levels.ERROR)
@@ -618,6 +618,14 @@ local function edit_workspace_connection(manager, workspace, connection, passwor
     reopen()
   end
 
+  local same_endpoint = candidate.host == workspace.host
+    and candidate.user == workspace.user
+    and candidate.port == workspace.port
+  if same_endpoint then
+    save(candidate.remote_root)
+    return
+  end
+
   util.notify("checking " .. candidate.host .. ":" .. candidate.remote_root)
   manager:browse_remote_async(candidate, password, candidate.remote_root, function(ok)
     if ok then
@@ -827,10 +835,39 @@ function M.open(manager)
       util.notify("connected to workspace " .. workspace.name)
     end
 
-    local function run(strategy)
+    local function sudo_password_error(message)
+      message = tostring(message):lower()
+      return message:find("sudo:%s+.*password", 1) ~= nil
+        or message:find("a password is required", 1, true) ~= nil
+        or message:find("no password was provided", 1, true) ~= nil
+    end
+
+    local function run(strategy, prompted_for_sudo)
       util.notify("connecting to " .. workspace.name)
       manager:connect_async(workspace.name, strategy, function(ok, core)
         if not ok then
+          if workspace.remote_sudo
+            and workspace.remote_sudo_auth == "password"
+            and not prompted_for_sudo
+            and not manager:has_sudo_password(workspace.name)
+            and sudo_password_error(core)
+          then
+            local input_ok, password = pcall(
+              vim.fn.inputsecret,
+              "Remote sudo password for " .. workspace.name .. ": "
+            )
+            if not input_ok then
+              util.notify(password, vim.log.levels.ERROR)
+              return
+            end
+            if password == "" then
+              util.notify("remote sudo password is required", vim.log.levels.ERROR)
+              return
+            end
+            manager:set_sudo_password(workspace.name, password)
+            run(strategy, true)
+            return
+          end
           util.notify(core, vim.log.levels.ERROR)
           return
         end
@@ -899,18 +936,6 @@ function M.open(manager)
       end
       manager:set_password(workspace.name, password)
     end
-    if workspace.remote_sudo and workspace.remote_sudo_auth == "password" and not manager:has_sudo_password(workspace.name) then
-      local ok, password = pcall(vim.fn.inputsecret, "Remote sudo password for " .. workspace.name .. ": ")
-      if not ok then
-        util.notify(password, vim.log.levels.ERROR)
-        return
-      end
-      if password == "" then
-        util.notify("remote sudo password is required", vim.log.levels.ERROR)
-        return
-      end
-      manager:set_sudo_password(workspace.name, password)
-    end
     choose_strategy()
   end
 
@@ -926,7 +951,6 @@ function M.open(manager)
     end
     prompt_connection(manager, workspace, function(connection, password, sudo_password)
       manager:set_password(workspace.name, password)
-      manager:set_sudo_password(workspace.name, sudo_password)
       edit_workspace_connection(manager, workspace, connection, password, sudo_password, reopen)
     end, true)
   end, { buffer = buffer, nowait = true })

@@ -187,7 +187,8 @@ require("remote-mirror").setup({
 
 The interactive connection screen offers password-backed and passwordless sudo.
 With `remote_sudo_auth = "password"`, remote-mirror asks for the sudo password
-separately from the SSH password, feeds it through stdin for shell commands,
+only after a sudo operation reports that authentication is required, then
+retries the operation. It feeds the password through stdin for shell commands
 and authenticates sudo before each rsync operation. Passwords are kept only in
 memory and are never written to the workspace registry or command arguments.
 With `remote_sudo_auth = "passwordless"`, it uses `sudo -n`, so the remote user

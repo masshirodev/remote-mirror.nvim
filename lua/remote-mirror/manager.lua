@@ -239,12 +239,6 @@ function M:_build_core(name)
       "remote-mirror: password required; edit or reconnect the workspace"
     )
   end
-  if config.remote_sudo and config.remote_sudo_auth == "password" then
-    config._sudo_password = assert(
-      self.sudo_credentials[name],
-      "remote-mirror: remote sudo password required; edit or reconnect the workspace"
-    )
-  end
   return Core.new(config, {
     transport = Transport.new(config, require("remote-mirror.async").runner),
   })
@@ -317,12 +311,6 @@ function M:connect(name)
     config._password = assert(
       self.credentials[name],
       "remote-mirror: password required; edit or reconnect the workspace"
-    )
-  end
-  if config.remote_sudo and config.remote_sudo_auth == "password" then
-    config._sudo_password = assert(
-      self.sudo_credentials[name],
-      "remote-mirror: remote sudo password required; edit or reconnect the workspace"
     )
   end
   local core = Core.new(config)
