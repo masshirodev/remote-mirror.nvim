@@ -123,7 +123,9 @@ M.suggestion_minimum_bytes = 10 * 1024 * 1024
 M.suggestion_limit = 8
 
 -- Ranks the heaviest directories the current rules would still mirror, so the
--- ignore screen can offer them instead of only listing built-in defaults.
+-- ignore screen can offer them instead of only listing built-in defaults. If a
+-- large directory has large children in the report, prefer those children:
+-- ignoring an important parent such as `wp-content/` is usually too broad.
 function M.suggest(directories, defaults, remote_contents, minimum)
   minimum = minimum or M.suggestion_minimum_bytes
   local suggestions = {}
@@ -133,7 +135,21 @@ function M.suggest(directories, defaults, remote_contents, minimum)
     for _, suggestion in ipairs(suggestions) do
       covered = covered or entry.path:sub(1, #suggestion.path + 1) == suggestion.path .. "/"
     end
+    local has_large_child = false
     if not covered and entry.size >= minimum then
+      for _, child in ipairs(directories or {}) do
+        if child.path:sub(1, #entry.path + 1) == entry.path .. "/"
+          and child.path:find("/", #entry.path + 2, true) == nil
+          and child.size >= minimum
+          and not M.is_ignored(child.path, defaults, remote_contents)
+        then
+          has_large_child = true
+          break
+        end
+      end
+    end
+
+    if not covered and not has_large_child and entry.size >= minimum then
       table.insert(suggestions, { path = entry.path, size = entry.size })
       if #suggestions >= M.suggestion_limit then
         break

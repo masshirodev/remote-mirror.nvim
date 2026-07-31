@@ -12,6 +12,7 @@ local defaults = {
   poll_auto_pull = true,
   ssh_connect_timeout = 10,
   remote_sudo = false,
+  remote_sudo_auth = "passwordless",
   ssh_command = "ssh",
   ssh_args = {},
   transfer = "rsync",
@@ -90,6 +91,10 @@ function M.normalize(options)
     "remote-mirror: transfer must be rsync or scp"
   )
   assert(type(options.remote_sudo) == "boolean", "remote-mirror: remote_sudo must be a boolean")
+  assert(
+    options.remote_sudo_auth == "passwordless" or options.remote_sudo_auth == "password",
+    "remote-mirror: remote_sudo_auth must be passwordless or password"
+  )
   assert(
     not options.remote_sudo or options.transfer == "rsync",
     "remote-mirror: remote_sudo requires transfer = rsync; SCP cannot privilege its destination"

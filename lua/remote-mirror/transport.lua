@@ -100,12 +100,30 @@ printf '%s\n' "$REMOTE_MIRROR_PASSWORD"
 end
 
 function M:ssh(remote_command, options)
-  local command = self:ssh_arguments()
+  local command = remote_command
+  local process_options = options
   if self.config.remote_sudo then
-    remote_command = "sudo -n sh -c " .. util.shell_quote(remote_command)
+    local sudo = self.config.remote_sudo_auth == "password" and "sudo -S -p '' " or "sudo -n "
+    command = sudo .. "sh -c " .. util.shell_quote(remote_command)
+    if self.config.remote_sudo_auth == "password" then
+      process_options = vim.tbl_extend("force", {}, options or {}, {
+        stdin = self.config._sudo_password .. "\n" .. ((options and options.stdin) or ""),
+      })
+    end
   end
+  return self:ssh_raw(command, process_options)
+end
+
+function M:ssh_raw(remote_command, options)
+  local command = self:ssh_arguments()
   vim.list_extend(command, { self.config.host, remote_command })
   return self.run(command, self:process_options(options))
+end
+
+function M:prepare_rsync()
+  if self.config.remote_sudo and self.config.remote_sudo_auth == "password" then
+    self:ssh_raw("sudo -S -p '' -v", { stdin = self.config._sudo_password .. "\n" })
+  end
 end
 
 function M:remote_spec(path)
@@ -340,6 +358,7 @@ function M:estimate(filter_path, remote_contents)
   end
   local destination = util.join(self.config.state_root, "estimate")
   util.ensure_dir(destination)
+  self:prepare_rsync()
   local command = { self.config.rsync_command }
   vim.list_extend(command, self.config.rsync_args)
   vim.list_extend(command, {
@@ -418,6 +437,7 @@ function M:pull(filter_path, protected)
   if self.config.transfer == "scp" then
     return self:_scp_pull(protected)
   end
+  self:prepare_rsync()
   util.ensure_dir(self.config.source_root)
   local command = { self.config.rsync_command }
   vim.list_extend(command, self.config.rsync_args)
@@ -437,6 +457,7 @@ function M:push(filter_path)
   if self.config.transfer == "scp" then
     return self:_scp_push()
   end
+  self:prepare_rsync()
   local command = { self.config.rsync_command }
   vim.list_extend(command, self.config.rsync_args)
   vim.list_extend(command, {
@@ -455,6 +476,7 @@ function M:changes(filter_path)
   if self.config.transfer == "scp" then
     return self:_scp_changes()
   end
+  self:prepare_rsync()
   util.ensure_dir(self.config.source_root)
   local command = { self.config.rsync_command }
   vim.list_extend(command, self.config.rsync_args)
@@ -511,6 +533,7 @@ function M:download(path)
       destination,
     })
   else
+    self:prepare_rsync()
     command = { self.config.rsync_command }
     vim.list_extend(command, self.config.rsync_args)
     vim.list_extend(command, {
@@ -537,6 +560,7 @@ function M:upload(path)
       self:scp_remote_spec(self.config.remote_root .. "/" .. path),
     })
   else
+    self:prepare_rsync()
     command = { self.config.rsync_command }
     vim.list_extend(command, self.config.rsync_args)
     vim.list_extend(command, {

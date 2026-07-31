@@ -49,6 +49,16 @@ test("normalizes remote sudo for rsync workspaces", function()
     mirror_root = "/tmp/remote-mirror-test",
   })
   assert_equal(true, config.remote_sudo)
+  assert_equal("passwordless", config.remote_sudo_auth)
+
+  local password_config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    remote_sudo = true,
+    remote_sudo_auth = "password",
+    mirror_root = "/tmp/remote-mirror-test",
+  })
+  assert_equal("password", password_config.remote_sudo_auth)
 
   local scp_ok, scp_err = pcall(require("remote-mirror.config").normalize, {
     host = "server",
@@ -347,7 +357,7 @@ test("suggests heavy directories that the current rules still mirror", function(
   }
   local suggestions = Ignore.suggest(directories, { "node_modules/", "*.log" }, "")
   assert_equal({
-    { path = "storage", size = 300 * 1024 * 1024 },
+    { path = "storage/logs", size = 290 * 1024 * 1024 },
     { path = "public/uploads", size = 40 * 1024 * 1024 },
   }, suggestions)
 
@@ -506,6 +516,32 @@ test("uses noninteractive sudo for remote shell and rsync writes", function()
     end
   end
   assert(rsync_path and rsync_path:find("sudo %-n", 1, false), vim.inspect(commands))
+end)
+
+test("uses a transient sudo password for shell commands and rsync authentication", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    remote_sudo = true,
+    remote_sudo_auth = "password",
+    mirror_root = vim.fn.tempname(),
+    _sudo_password = "sudo-secret",
+  })
+  local commands = {}
+  local runner = function(command, options)
+    table.insert(commands, { command = command, options = options })
+    return { code = 0, stdout = "", stderr = "" }
+  end
+  local transport = require("remote-mirror.transport").new(config, runner)
+  transport:ssh("mkdir -p /srv/example")
+  transport:upload("main.lua")
+
+  assert(commands[1].command[#commands[1].command]:find("sudo %-S %-p '' sh %-c", 1, false))
+  assert_equal("sudo-secret\n", commands[1].options.stdin)
+  assert(commands[3].command[#commands[3].command]:find("sudo -S -p '' -v", 1, true))
+  assert_equal("sudo-secret\n", commands[3].options.stdin)
+  assert(commands[4].command[1] == "rsync")
+  assert(not vim.inspect(commands[4].command):find("sudo%-secret", 1, false))
 end)
 
 test("parses an rsync dry-run estimate", function()

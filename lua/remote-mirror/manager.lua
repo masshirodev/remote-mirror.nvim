@@ -16,6 +16,7 @@ local workspace_keys = {
   "auth",
   "transfer",
   "remote_sudo",
+  "remote_sudo_auth",
   "ssh_config_file",
   "ssh_command",
   "ssh_args",
@@ -44,6 +45,7 @@ function M.new(options)
     registry = Registry.new(registry_path):load(),
     current = nil,
     credentials = {},
+    sudo_credentials = {},
   }, M)
 
   for _, workspace in ipairs(options.workspaces or {}) do
@@ -61,7 +63,14 @@ function M:workspace_options(workspace)
       options[key] = workspace[key]
     end
   end
-  return Config.normalize(options)
+  local config = Config.normalize(options)
+  if self.credentials[config.name] then
+    config._password = self.credentials[config.name]
+  end
+  if self.sudo_credentials[config.name] then
+    config._sudo_password = self.sudo_credentials[config.name]
+  end
+  return config
 end
 
 function M:add(workspace)
@@ -88,6 +97,18 @@ function M:set_password(name, password)
   end
 end
 
+function M:set_sudo_password(name, password)
+  if password and password ~= "" then
+    self.sudo_credentials[name] = password
+  else
+    self.sudo_credentials[name] = nil
+  end
+end
+
+function M:has_sudo_password(name)
+  return self.sudo_credentials[name] ~= nil
+end
+
 function M:has_password(name)
   return self.credentials[name] ~= nil
 end
@@ -110,6 +131,7 @@ function M:remove(name)
     self:_deactivate()
   end
   self.credentials[name] = nil
+  self.sudo_credentials[name] = nil
   self.registry:remove(name)
 end
 
@@ -217,6 +239,12 @@ function M:_build_core(name)
       "remote-mirror: password required; edit or reconnect the workspace"
     )
   end
+  if config.remote_sudo and config.remote_sudo_auth == "password" then
+    config._sudo_password = assert(
+      self.sudo_credentials[name],
+      "remote-mirror: remote sudo password required; edit or reconnect the workspace"
+    )
+  end
   return Core.new(config, {
     transport = Transport.new(config, require("remote-mirror.async").runner),
   })
@@ -289,6 +317,12 @@ function M:connect(name)
     config._password = assert(
       self.credentials[name],
       "remote-mirror: password required; edit or reconnect the workspace"
+    )
+  end
+  if config.remote_sudo and config.remote_sudo_auth == "password" then
+    config._sudo_password = assert(
+      self.sudo_credentials[name],
+      "remote-mirror: remote sudo password required; edit or reconnect the workspace"
     )
   end
   local core = Core.new(config)

@@ -77,7 +77,8 @@ local function prompt_connection(manager, workspace, callback, edit_host)
           end
           local transfer = choice:match("^SCP") and "scp" or "rsync"
           local sudo_choices = transfer == "rsync" and {
-            "Use remote sudo (passwordless sudo -n)",
+            "Use remote sudo (ask for password)",
+            "Use remote sudo (passwordless)",
             "Do not use remote sudo",
             "Cancel",
           } or { "Do not use remote sudo", "Cancel" }
@@ -87,15 +88,35 @@ local function prompt_connection(manager, workspace, callback, edit_host)
             if sudo_choice == nil or sudo_choice == "Cancel" then
               return
             end
-            callback({
+            local remote_sudo = sudo_choice:match("^Use remote sudo") ~= nil
+            local remote_sudo_auth = not remote_sudo and "passwordless"
+              or (sudo_choice:match("passwordless") and "passwordless" or "password")
+            local function finish(sudo_password)
+              callback({
               host = host,
               user = user ~= "" and user or nil,
               port = port ~= "" and port or nil,
               auth = password ~= "" and "password" or "ssh",
               transfer = transfer,
-              remote_sudo = sudo_choice:match("^Use") ~= nil,
+              remote_sudo = remote_sudo,
+              remote_sudo_auth = remote_sudo_auth,
               ssh_config_file = resolved.config_file,
-            }, password)
+              }, password, sudo_password)
+            end
+            if remote_sudo and remote_sudo_auth == "password" then
+              local sudo_ok, sudo_password = pcall(vim.fn.inputsecret, "Remote sudo password: ")
+              if not sudo_ok then
+                util.notify(sudo_password, vim.log.levels.ERROR)
+                return
+              end
+              if sudo_password == "" then
+                util.notify("remote sudo password is required", vim.log.levels.ERROR)
+                return
+              end
+              finish(sudo_password)
+            else
+              finish(nil)
+            end
           end)
         end)
       end)
@@ -173,7 +194,7 @@ local function open_ignore_editor(manager, definition, password, stats, reopen)
   )
   local cursor_line = #lines
   if #suggestions > 0 then
-    vim.list_extend(lines, { "", "# Largest directories the rules above do not cover:" })
+    vim.list_extend(lines, { "", "# Largest directories/subdirectories the rules above do not cover:" })
     for _, suggestion in ipairs(suggestions) do
       table.insert(lines, ("#   %10s  %s/"):format(util.format_bytes(suggestion.size), suggestion.path))
     end
@@ -521,8 +542,9 @@ end
 local function add_workspace(manager, reopen)
   prompt_workspace_name(manager, function(name)
     prompt("SSH host or alias: ", function(host)
-      prompt_connection(manager, { host = host }, function(connection, password)
+      prompt_connection(manager, { host = host }, function(connection, password, sudo_password)
         local base = vim.tbl_extend("force", connection, { name = name, host = host })
+        manager:set_sudo_password(name, sudo_password)
         local rules = {}
         open_remote_browser(manager, base, password, function(remote_root)
           local definition = vim.tbl_extend("force", base, { remote_root = remote_root })
@@ -580,7 +602,7 @@ end
 -- registration until the new endpoint has a usable directory, and let the
 -- user choose a replacement instead of creating a path or transferring files
 -- implicitly.
-local function edit_workspace_connection(manager, workspace, connection, password, reopen)
+local function edit_workspace_connection(manager, workspace, connection, password, sudo_password, reopen)
   local candidate = vim.tbl_extend("force", {}, workspace, connection)
 
   local function save(remote_root)
@@ -591,6 +613,7 @@ local function edit_workspace_connection(manager, workspace, connection, passwor
       return
     end
     manager:set_password(workspace.name, password)
+    manager:set_sudo_password(workspace.name, sudo_password)
     util.notify("updated connection for " .. workspace.name)
     reopen()
   end
@@ -602,12 +625,16 @@ local function edit_workspace_connection(manager, workspace, connection, passwor
       return
     end
 
-    vim.ui.select({ "Choose a remote directory", "Cancel" }, {
-      prompt = ("%s does not contain %s. Choose a replacement directory?"):format(
-        candidate.host,
-        candidate.remote_root
+    vim.ui.select({ "Keep current path", "Choose a remote directory", "Cancel" }, {
+      prompt = ("Could not validate %s on %s. Keep it or choose another directory?"):format(
+        candidate.remote_root,
+        candidate.host
       ),
     }, function(choice)
+      if choice == "Keep current path" then
+        save(candidate.remote_root)
+        return
+      end
       if choice ~= "Choose a remote directory" then
         return
       end
@@ -620,7 +647,7 @@ local function edit_workspace_connection(manager, workspace, connection, passwor
         end,
         function() end,
         {},
-        nil
+        candidate.remote_root
       )
     end)
   end)
@@ -637,7 +664,7 @@ end
 local function open_reconcile_editor(manager, workspace, reviewing, on_connected)
   local lines = {
     ("Review connection: %s"):format(workspace.name),
-    "Edit only the first column, then press <leader>s or Ctrl-S to apply.",
+    "Edit the first column, or delete rows to skip those paths, then press <leader>s or Ctrl-S to apply.",
     "",
     "pull = remote wins    push = local wins    skip = leave both untouched",
     "For a one-sided file, pull deletes local-only and push deletes remote-only.",
@@ -690,7 +717,16 @@ local function open_reconcile_editor(manager, workspace, reviewing, on_connected
         counts[action] = counts[action] + 1
       end
     end
-    assert(vim.tbl_count(actions) == #reviewing.plan, "remote-mirror: every changed path needs an action")
+
+    -- A deleted review row is an explicit choice to leave that path alone.
+    -- This makes it practical to remove one or two rows without having to
+    -- preserve every generated line in the scratch buffer.
+    for _, change in ipairs(reviewing.plan) do
+      if not actions[change.path] then
+        actions[change.path] = "skip"
+        counts.skip = counts.skip + 1
+      end
+    end
     return actions, counts
   end
 
@@ -863,6 +899,18 @@ function M.open(manager)
       end
       manager:set_password(workspace.name, password)
     end
+    if workspace.remote_sudo and workspace.remote_sudo_auth == "password" and not manager:has_sudo_password(workspace.name) then
+      local ok, password = pcall(vim.fn.inputsecret, "Remote sudo password for " .. workspace.name .. ": ")
+      if not ok then
+        util.notify(password, vim.log.levels.ERROR)
+        return
+      end
+      if password == "" then
+        util.notify("remote sudo password is required", vim.log.levels.ERROR)
+        return
+      end
+      manager:set_sudo_password(workspace.name, password)
+    end
     choose_strategy()
   end
 
@@ -876,8 +924,10 @@ function M.open(manager)
     if not workspace then
       return
     end
-    prompt_connection(manager, workspace, function(connection, password)
-      edit_workspace_connection(manager, workspace, connection, password, reopen)
+    prompt_connection(manager, workspace, function(connection, password, sudo_password)
+      manager:set_password(workspace.name, password)
+      manager:set_sudo_password(workspace.name, sudo_password)
+      edit_workspace_connection(manager, workspace, connection, password, sudo_password, reopen)
     end, true)
   end, { buffer = buffer, nowait = true })
   -- A registered workspace already has its root, so its rules are edited in

@@ -37,6 +37,7 @@ function M:add(workspace)
     auth = workspace.auth or "ssh",
     transfer = workspace.transfer or "rsync",
     remote_sudo = workspace.remote_sudo or false,
+    remote_sudo_auth = workspace.remote_sudo_auth or "passwordless",
     ssh_config_file = workspace.ssh_config_file,
     ssh_command = workspace.ssh_command,
     ssh_args = workspace.ssh_args,

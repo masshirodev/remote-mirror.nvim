@@ -168,7 +168,7 @@ require("remote-mirror").setup({
 ```
 
 If the remote project is owned by root or another service account, use rsync
-with passwordless sudo explicitly:
+with remote sudo explicitly:
 
 ```lua
 require("remote-mirror").setup({
@@ -179,15 +179,20 @@ require("remote-mirror").setup({
       remote_root = "/srv/website",
       transfer = "rsync",
       remote_sudo = true,
+      remote_sudo_auth = "passwordless",
     },
   },
 })
 ```
 
-The interactive connection screen asks whether to enable this setting. It uses
-`sudo -n`, so the remote user must already have a matching noninteractive sudo
-rule; remote-mirror will never wait for or store a remote sudo password. SCP
-cannot use this mode and is rejected during configuration.
+The interactive connection screen offers password-backed and passwordless sudo.
+With `remote_sudo_auth = "password"`, remote-mirror asks for the sudo password
+separately from the SSH password, feeds it through stdin for shell commands,
+and authenticates sudo before each rsync operation. Passwords are kept only in
+memory and are never written to the workspace registry or command arguments.
+With `remote_sudo_auth = "passwordless"`, it uses `sudo -n`, so the remote user
+must already have a matching noninteractive sudo rule. SCP cannot use remote
+sudo and is rejected during configuration.
 
 `transfer` defaults to `"rsync"` and can be set to `"scp"` globally or per
 workspace. SCP keeps ignore, deletion, review, and conflict semantics, but bulk
@@ -236,6 +241,7 @@ exists, connecting requires one of three explicit strategies:
 Force pull and force push each show a separate destructive confirmation. The
 review buffer defaults every path to `pull`, because the running remote project
 is treated as authoritative until the user deliberately uploads a local edit.
+Delete a review row to leave that path untouched.
 A reviewed push is rejected if that remote path changes again between
 comparison and application.
 
@@ -418,7 +424,7 @@ rules screen also lists the heaviest directories that neither the built-in
 defaults nor an existing rule already covers:
 
 ```gitignore
-# Largest directories the rules above do not cover:
+# Largest directories/subdirectories the rules above do not cover:
 #    512.0 MiB  storage/
 #    331.0 MiB  public/uploads/
 #
@@ -429,7 +435,9 @@ defaults nor an existing rule already covers:
 
 Suggestions arrive commented out, so nothing is excluded without an explicit
 edit. A directory is suggested when it holds at least 10 MiB, up to eight of
-them, and a directory is skipped when one of its parents is already listed.
+them. When a large directory contains large immediate subdirectories, the
+subdirectories are suggested instead of the parent, so important folders such
+as `wp-content/` are not recommended as a single blanket ignore.
 
 ## Conflict behavior
 
