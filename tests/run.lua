@@ -2106,6 +2106,18 @@ exec /bin/sh -c "$1"
     [=['rsync' '--server' 'weird '\'' " $ ;']=],
     require("remote-mirror.util").read_file(command_capture)
   )
+
+  local direct_capture = vim.fn.tempname()
+  require("remote-mirror.util").write_file(
+    config.mirror_root .. "/onRemoteCommand",
+    "#!/bin/sh\nprintf '%s' \"$1\" > \"$REMOTE_MIRROR_TEST_DIRECT_COMMAND\"\n"
+  )
+  local direct_transport = require("remote-mirror.transport").new(config)
+  local direct_result = direct_transport:ssh("printf 'direct; $value'", {
+    env = { REMOTE_MIRROR_TEST_DIRECT_COMMAND = direct_capture },
+  })
+  assert_equal(0, direct_result.code)
+  assert_equal("printf 'direct; $value'", require("remote-mirror.util").read_file(direct_capture))
 end)
 
 test("workspace command hooks reject SCP", function()
