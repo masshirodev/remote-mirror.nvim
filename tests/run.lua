@@ -2056,6 +2056,56 @@ test("workspace hooks wrap remote commands and preserve hook input", function()
   assert(captured_args:find('su %-s /bin/sh %-c "$1" chatwoo001', 1, false), captured_args)
   assert(captured_args:find("weird", 1, true), captured_args)
   assert_equal("p@ss'w!rd\npayload", require("remote-mirror.util").read_file(fake_stdin))
+
+  local command_capture = vim.fn.tempname()
+  local command_hook = vim.fn.tempname()
+  local executing_ssh = vim.fn.tempname()
+  require("remote-mirror.util").write_file(
+    command_hook,
+    "#!/bin/sh\nprintf '%s' \"$1\" > \"$REMOTE_MIRROR_TEST_COMMAND\"\n"
+  )
+  assert(vim.uv.fs_chmod(command_hook, 493))
+  config.mirror_root = vim.fn.tempname()
+  require("remote-mirror.util").ensure_dir(config.mirror_root)
+  require("remote-mirror.util").write_file(
+    config.mirror_root .. "/onRemoteCommand",
+    require("remote-mirror.util").read_file(command_hook)
+  )
+  require("remote-mirror.util").write_file(
+    executing_ssh,
+    [[#!/bin/sh
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o|-F|-p|-l) shift 2 ;;
+    *) shift; break ;;
+  esac
+done
+exec /bin/sh -c "$1"
+]]
+  )
+  assert(vim.uv.fs_chmod(executing_ssh, 493))
+  config.ssh_command = executing_ssh
+  local command_transport = require("remote-mirror.transport").new(config, function()
+    return { code = 0, stdout = "", stderr = "" }
+  end)
+  local command_wrapper = config.state_root .. "/remote-command-hook.sh"
+  command_transport:rsync_shell()
+  local command_result = vim.system({
+    command_wrapper,
+    "server",
+    "rsync",
+    "--server",
+    "weird ' \" $ ;",
+  }, {
+    env = {
+      REMOTE_MIRROR_TEST_COMMAND = command_capture,
+    },
+  }):wait()
+  assert_equal(0, command_result.code)
+  assert_equal(
+    [=['rsync' '--server' 'weird '\'' " $ ;']=],
+    require("remote-mirror.util").read_file(command_capture)
+  )
 end)
 
 test("workspace command hooks reject SCP", function()

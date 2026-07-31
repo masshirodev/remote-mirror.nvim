@@ -215,7 +215,7 @@ shift
 
 quote() {
   printf "'"
-  printf "%%s" "$1" | sed "s/'/'\\''/g"
+  printf "%%s" "$1" | sed "s/'/'\\\\''/g"
   printf "'"
 }
 
@@ -230,7 +230,7 @@ for argument in "$@"; do
 done
 
 remote_command_prefix=%s
-remote_command="$remote_command_prefix$remote_command"
+remote_command="$remote_command_prefix$(quote "$remote_command")"
 if [ "${REMOTE_MIRROR_HOOK_PASSWORD+x}" = x ]; then
   { printf '%%s\n' "$REMOTE_MIRROR_HOOK_PASSWORD"; cat; } | exec %s "$host" "$remote_command"
 else
