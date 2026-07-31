@@ -847,7 +847,6 @@ function M.open(manager)
       manager:connect_async(workspace.name, strategy, function(ok, core)
         if not ok then
           if workspace.remote_sudo
-            and workspace.remote_sudo_auth == "password"
             and not prompted_for_sudo
             and not manager:has_sudo_password(workspace.name)
             and sudo_password_error(core)
@@ -863,6 +862,13 @@ function M.open(manager)
             if password == "" then
               util.notify("remote sudo password is required", vim.log.levels.ERROR)
               return
+            end
+            if workspace.remote_sudo_auth ~= "password" then
+              local updated = manager:update_connection(workspace.name, {
+                remote_sudo = true,
+                remote_sudo_auth = "password",
+              })
+              workspace.remote_sudo_auth = updated.remote_sudo_auth
             end
             manager:set_sudo_password(workspace.name, password)
             run(strategy, true)
