@@ -23,12 +23,27 @@ function M:_close_handles()
   self.handles = {}
 end
 
+-- The watcher rescans constantly, so the same unreadable path would otherwise
+-- produce one warning per filesystem event. Only a change in what is wrong is
+-- worth reporting again, and a resolved problem is forgotten so its return is.
+function M:_report(key, message, level)
+  self.reported = self.reported or {}
+  if self.reported[key] == message then
+    return
+  end
+  self.reported[key] = message
+  if message then
+    util.notify(message, level)
+  end
+end
+
 function M:_watch_directories()
   self:_close_handles()
+  local unwatched = {}
   for _, directory in ipairs(util.walk_directories(self.core.config.source_root)) do
     local handle = vim.uv.new_fs_event()
     if handle then
-      local ok = handle:start(directory, {}, vim.schedule_wrap(function(err)
+      local ok, start_error = handle:start(directory, {}, vim.schedule_wrap(function(err)
         if err then
           util.notify(("watch failed for %s: %s"):format(directory, err), vim.log.levels.WARN)
           return
@@ -38,17 +53,38 @@ function M:_watch_directories()
       if ok then
         table.insert(self.handles, handle)
       else
+        -- A directory that cannot be watched still receives external edits;
+        -- they simply stop reaching the upload path, which is worth saying.
+        local relative = util.relative_path(self.core.config.source_root, directory)
+        table.insert(unwatched, ("%s (%s)"):format(
+          (relative and relative ~= "") and relative or ".",
+          start_error or "could not be watched"
+        ))
         handle:close()
       end
     end
   end
+
+  self:_report(
+    "unwatched",
+    #unwatched > 0 and ("%d directory(ies) are not being watched for external changes: %s"):format(
+      #unwatched,
+      table.concat(unwatched, ", ")
+    ) or nil,
+    vim.log.levels.WARN
+  )
 end
 
 function M:scan()
   if self.stopped then
     return
   end
-  local current = util.walk_files(self.core.config.source_root)
+  local current, unreadable = util.walk_files(self.core.config.source_root)
+  self:_report(
+    "unreadable",
+    #unreadable > 0 and util.unreadable_message(unreadable) or nil,
+    vim.log.levels.WARN
+  )
   local changed = {}
 
   for path, hash in pairs(current) do

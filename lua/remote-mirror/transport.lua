@@ -1,10 +1,47 @@
 local Ignore = require("remote-mirror.ignore")
 local Hooks = require("remote-mirror.hooks")
+local Progress = require("remote-mirror.progress")
 local process = require("remote-mirror.process")
 local util = require("remote-mirror.util")
 
 local M = {}
 M.__index = M
+
+-- rsync reports progress by rewriting one line with carriage returns, so a
+-- single read can hold several updates and only the last one is current.
+local function report_rsync_progress(chunk)
+  local transferred, percent
+  for bytes, complete in chunk:gmatch("([%d,]+)%s+(%d+)%%") do
+    transferred, percent = bytes, complete
+  end
+  if not transferred then
+    return
+  end
+
+  local parts = { percent .. "%", util.format_bytes((transferred:gsub(",", ""))) }
+  local remaining, total
+  for left, count in chunk:gmatch("to%-chk=(%d+)/(%d+)") do
+    remaining, total = tonumber(left), tonumber(count)
+  end
+  if remaining and total then
+    table.insert(parts, ("%d/%d files"):format(total - remaining, total))
+  end
+  Progress.detail(table.concat(parts, "  "))
+end
+
+function M:_bulk_options()
+  local options = { remote_command_hook = true }
+  if self.config.rsync_progress then
+    options.on_stdout = report_rsync_progress
+  end
+  return self:process_options(options)
+end
+
+function M:_bulk_arguments(command)
+  if self.config.rsync_progress then
+    table.insert(command, "--info=progress2")
+  end
+end
 
 function M.new(config, runner)
   if Hooks.has(config, "onRemoteCommand") then
@@ -543,6 +580,7 @@ function M:pull(filter_path, protected)
   util.ensure_dir(self.config.source_root)
   local command = { self.config.rsync_command }
   vim.list_extend(command, self.config.rsync_args)
+  self:_bulk_arguments(command)
   vim.list_extend(command, {
     "--protect-args",
     "--rsh=" .. self:rsync_shell(),
@@ -552,7 +590,7 @@ function M:pull(filter_path, protected)
     self:remote_spec(self.config.remote_root .. "/"),
     self.config.source_root .. "/",
   })
-  return self.run(command, self:process_options({ remote_command_hook = true }))
+  return self.run(command, self:_bulk_options())
 end
 
 function M:push(filter_path)
@@ -562,6 +600,7 @@ function M:push(filter_path)
   self:prepare_rsync()
   local command = { self.config.rsync_command }
   vim.list_extend(command, self.config.rsync_args)
+  self:_bulk_arguments(command)
   vim.list_extend(command, {
     "--protect-args",
     "--rsh=" .. self:rsync_shell(),
@@ -571,7 +610,7 @@ function M:push(filter_path)
     self.config.source_root .. "/",
     self:remote_spec(self.config.remote_root .. "/"),
   })
-  return self.run(command, self:process_options({ remote_command_hook = true }))
+  return self.run(command, self:_bulk_options())
 end
 
 function M:changes(filter_path)
@@ -638,6 +677,7 @@ function M:download(path)
     self:prepare_rsync()
     command = { self.config.rsync_command }
     vim.list_extend(command, self.config.rsync_args)
+    self:_bulk_arguments(command)
     vim.list_extend(command, {
       "--protect-args",
       "--rsh=" .. self:rsync_shell(),
@@ -646,7 +686,7 @@ function M:download(path)
       destination,
     })
   end
-  return self.run(command, self:process_options({ remote_command_hook = true }))
+  return self.run(command, self:_bulk_options())
 end
 
 function M:upload(path)
@@ -665,6 +705,7 @@ function M:upload(path)
     self:prepare_rsync()
     command = { self.config.rsync_command }
     vim.list_extend(command, self.config.rsync_args)
+    self:_bulk_arguments(command)
     vim.list_extend(command, {
       "--protect-args",
       "--rsh=" .. self:rsync_shell(),
@@ -673,7 +714,7 @@ function M:upload(path)
       self:remote_spec(self.config.remote_root .. "/" .. path),
     })
   end
-  return self.run(command, self:process_options({ remote_command_hook = true }))
+  return self.run(command, self:_bulk_options())
 end
 
 function M:delete(path)
@@ -691,8 +732,9 @@ function M:_scp_pull(protected)
   end
   table.sort(paths)
 
-  for _, path in ipairs(paths) do
+  for index, path in ipairs(paths) do
     if self:_included(path, remote_contents) and not protected_paths[path] then
+      Progress.detail(("%d/%d files"):format(index, #paths))
       self:download(path)
     end
   end
@@ -712,12 +754,19 @@ end
 function M:_scp_push()
   local remote_contents = self:_remote_ignore_rules()
   local remote = self:manifest()
-  local local_files = util.walk_files(self.config.source_root)
+  -- Remote files with no local counterpart are deleted below, so a local path
+  -- that could not be read must never be mistaken for one that is gone.
+  local local_files, unreadable = util.walk_files(self.config.source_root)
+  assert(
+    #unreadable == 0,
+    "remote-mirror: refusing to push because " .. util.unreadable_message(unreadable)
+  )
   local paths = vim.tbl_keys(local_files)
   table.sort(paths)
 
-  for _, path in ipairs(paths) do
+  for index, path in ipairs(paths) do
     if self:_included(path, remote_contents) then
+      Progress.detail(("%d/%d files"):format(index, #paths))
       self:upload(path)
     end
   end

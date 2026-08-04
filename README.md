@@ -17,7 +17,10 @@ navigating a `source/` directory.
 - automatic uploads for Neovim saves and external filesystem changes;
 - focus-triggered checks that keep open files current with the remote;
 - explicit push, refresh, disconnect, and conflict resolution;
-- hash checks that prevent silent remote overwrites.
+- hash checks that prevent silent remote overwrites;
+- a progress indicator with live transfer figures, plus a statusline component;
+- readable failure popups backed by a full message log;
+- local files that cannot be read are reported instead of pushed as deletions.
 
 ## Requirements
 
@@ -224,9 +227,16 @@ protocol instead of modern SFTP-backed SCP.
 
 Leave `auth` unset (or use `auth = "ssh"`) for SSH config, agent, and identity
 authentication. Password authentication is selected interactively. Passwords
-are kept only in Neovim memory for the active session and are requested again
-after restarting Neovim; they are never written to the workspace registry or
-mirror state.
+are kept only in Neovim memory, never written to the workspace registry or
+mirror state, and dropped as soon as they stop being useful:
+
+- **A failed connection forgets them.** A rejected password that stayed cached
+  would make every later attempt fail the same way without ever asking again.
+  The next connection asks for whatever it needs, so a typo costs one retry
+  rather than a Neovim restart.
+- **Disconnecting forgets them.** Reconnecting in the same session asks again.
+- **Leaving Neovim forgets them**, along with the remote sudo and
+  `onRemoteCommand` passwords, which follow the same rules.
 
 ## Workspace hooks
 
@@ -331,6 +341,66 @@ push, or resolution reconciles it.
 | `:RemoteMirrorConflicts` | Display recorded conflicts |
 | `:RemoteMirrorResolve {path} pull` | Replace the local file with the remote version |
 | `:RemoteMirrorResolve {path} push` | Explicitly overwrite the remote version |
+| `:RemoteMirrorMessages` | Show every message this session in full |
+
+## Progress and messages
+
+An SSH transfer gives Neovim nothing to show while it runs, and the first
+synchronization of a remote workspace is the longest one there is: without a
+sign of activity it is indistinguishable from a plugin that stopped working.
+Every connection, transfer, review, remote listing, and preflight measurement
+reports itself in a small window in the top-right corner while it is in flight.
+
+rsync transfers report real figures — percentage, bytes moved, and files
+completed — because rsync is asked for them with `--info=progress2`. SCP
+transfers report the file count, which is all a per-file copy loop knows. Set
+`rsync_progress = false` globally or per workspace for an rsync older than
+3.1, which does not understand that option.
+
+The same information is available as a statusline component, which is an empty
+string while nothing is running:
+
+```lua
+require("lualine").setup({
+  sections = {
+    lualine_x = { require("remote-mirror").status },
+  },
+})
+```
+
+Messages appear as popups in the bottom-right corner, stacked newest at the
+bottom, and time out on their own; errors stay up twice as long. A transfer
+failure is summarized on the first line — a rejected password, an untrusted
+host key, a full filesystem — with the original ssh or rsync output kept
+underneath it rather than discarded. `:RemoteMirrorMessages` reopens the full
+log of the session, which is where a message that has already timed out, or
+one that was too long for its popup, can still be read.
+
+```lua
+require("remote-mirror").setup({
+  progress = {
+    window = true,
+    spinner = { "-", "\\", "|", "/" },
+    interval_ms = 120,
+    delay_ms = 250,
+  },
+  notifications = {
+    style = "popup",
+    timeout = 6000,
+    width = 0.5,
+  },
+})
+```
+
+The window waits `delay_ms` before it appears, so an operation that answers
+immediately — a focus check against two open files, say — never flashes a
+window between keystrokes. The statusline component reports from the first
+tick, because updating it costs the reader nothing.
+
+Set `progress.window = false` to keep only the statusline component, and
+`notifications.style = "vim.notify"` to hand every message to `vim.notify`,
+which is what a notification plugin such as `snacks.nvim` or `noice.nvim`
+replaces. The message log is kept either way.
 
 ## Deleting a local mirror
 
@@ -348,8 +418,8 @@ the layout it owns.
 saves, and restores the working directory that was current before connecting.
 The local mirror, its synchronization state, and any open buffers are left
 alone, so reconnecting later reconciles from that mirror instead of pulling
-everything again. The session password is also kept, so a reconnect within the
-same session does not prompt for it.
+everything again. The session passwords are dropped, so reconnecting asks for
+them again.
 
 The command refuses to run while a pull, push, refresh, or upload is still in
 flight, so a transfer is never abandoned halfway. Use
@@ -376,6 +446,34 @@ scripts enter the same debounced upload path as `BufWritePost`.
 New directories are discovered whenever the watcher rescans. Set `watch =
 false` to disable external-change watching, or change `watch_debounce_ms`
 (default `300`) and `debounce_ms` (default `200`) to tune batching.
+
+A directory the watcher cannot register for filesystem events still receives
+external edits; they simply stop reaching the upload path. Those directories
+are named in a warning once, and again only if which ones they are changes.
+
+## Unreadable local files
+
+The mirror is scanned by reading every file in it, so a file the Neovim process
+cannot read produces no hash — exactly like a file that was deleted. Left
+undetected, one missing filesystem permission would make the next push delete
+its counterpart on the remote host.
+
+An unreadable file is therefore distinguished from an absent one everywhere it
+matters:
+
+- **A push refuses to run.** `:RemoteMirrorPush` and the SCP bulk push name the
+  paths and transfer nothing, because both infer remote deletions from paths
+  that are missing locally.
+- **A single upload refuses to run.** A saved or externally changed file that
+  cannot be read afterwards is reported and is neither uploaded nor deleted on
+  the remote host.
+- **A refresh reports it and continues.** Comparing manifests never deletes
+  anything, so an unreadable path is a warning rather than a stop.
+- **The watcher reports it once**, rather than once per filesystem event.
+
+A directory that cannot be listed is reported the same way, as the whole
+subtree under it would otherwise look empty. A mirror directory that does not
+exist yet is absent, not unreadable, and is created normally.
 
 ## Remote change checks
 

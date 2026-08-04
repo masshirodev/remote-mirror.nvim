@@ -5,13 +5,22 @@ local M = {
 }
 
 function M.setup(options)
+  options = options or {}
   if M._manager then
     M._manager:stop()
   end
+  require("remote-mirror.notify").setup(options.notifications)
+  require("remote-mirror.progress").setup(options.progress)
   local manager = Manager.new(options)
   require("remote-mirror.commands").register(manager)
   M._manager = manager
   return manager
+end
+
+-- Statusline component: empty while nothing is running, so it takes no room in
+-- an idle session.
+function M.status()
+  return require("remote-mirror.progress").status()
 end
 
 local function manager()

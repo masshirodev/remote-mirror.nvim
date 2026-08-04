@@ -2,6 +2,7 @@ local Config = require("remote-mirror.config")
 local Core = require("remote-mirror.core")
 local Hooks = require("remote-mirror.hooks")
 local Ignore = require("remote-mirror.ignore")
+local Progress = require("remote-mirror.progress")
 local Registry = require("remote-mirror.registry")
 local Transport = require("remote-mirror.transport")
 local util = require("remote-mirror.util")
@@ -23,6 +24,7 @@ local workspace_keys = {
   "ssh_args",
   "rsync_command",
   "rsync_args",
+  "rsync_progress",
   "scp_command",
   "scp_args",
   "remote_find_command",
@@ -131,6 +133,16 @@ function M:has_password(name)
   return self.credentials[name] ~= nil
 end
 
+-- A cached password that the host already refused makes every later attempt
+-- fail the same way without ever asking again, and a password kept after the
+-- workspace is gone protects nothing. Both cases drop every secret held for
+-- the workspace, so the next connection asks for them.
+function M:forget_credentials(name)
+  self.credentials[name] = nil
+  self.sudo_credentials[name] = nil
+  self.hook_credentials[name] = nil
+end
+
 function M:resolve_ssh(host, ssh_command)
   return require("remote-mirror.ssh_config").resolve(
     ssh_command or self.options.ssh_command or "ssh",
@@ -148,9 +160,7 @@ function M:remove(name)
   if self.current and self.current.config.name == name then
     self:_deactivate()
   end
-  self.credentials[name] = nil
-  self.sudo_credentials[name] = nil
-  self.hook_credentials[name] = nil
+  self:forget_credentials(name)
   self.registry:remove(name)
 end
 
@@ -281,6 +291,7 @@ function M:_run_connected_hook(core, callback)
   Hooks.run_async(core.config, "onConnected", function(ok, result)
     if not ok then
       self:_deactivate()
+      self:forget_credentials(core.config.name)
       callback(false, result)
       return
     end
@@ -324,6 +335,7 @@ function M:disconnect(force)
 
   local hook_ok, hook_error = pcall(Hooks.run, core.config, "onDisconnected")
   self:_deactivate()
+  self:forget_credentials(core.config.name)
   return {
     name = core.config.name,
     pending = pending,
@@ -332,6 +344,15 @@ function M:disconnect(force)
 end
 
 function M:connect(name)
+  local ok, result = pcall(self._connect, self, name)
+  if not ok then
+    self:forget_credentials(name)
+    error(result, 0)
+  end
+  return result
+end
+
+function M:_connect(name)
   local workspace = self.registry.workspaces[name]
   assert(workspace, "remote-mirror: unknown workspace " .. name)
   if self.current then
@@ -390,6 +411,7 @@ function M:connect_async(name, strategy, callback)
   end
 
   self.connecting = name
+  local progress = Progress.start(("connecting to %s"):format(name))
   require("remote-mirror.async").run(function()
     core:ensure_layout()
     if strategy == "force_pull" then
@@ -402,11 +424,13 @@ function M:connect_async(name, strategy, callback)
     return core
   end, function(connect_ok, result)
     self.connecting = false
+    progress:finish()
     if connect_ok then
       self:_activate(result)
       self:_run_connected_hook(result, callback)
       return
     end
+    self:forget_credentials(name)
     callback(connect_ok, result)
   end)
 end
@@ -423,11 +447,14 @@ function M:review_connect_async(name, callback)
   end
 
   self.connecting = name
+  local progress = Progress.start(("comparing %s with the remote workspace"):format(name))
   require("remote-mirror.async").run(function()
     return core:reconcile_plan()
   end, function(review_ok, plan)
+    progress:finish()
     if not review_ok then
       self.connecting = false
+      self:forget_credentials(name)
       callback(false, plan)
       return
     end
@@ -442,12 +469,17 @@ function M:apply_review_async(actions, callback)
     callback(false, "remote-mirror: no reviewed connection is pending")
     return
   end
+  local progress = Progress.start(("applying the reviewed connection to %s"):format(reviewing.name))
   require("remote-mirror.async").run(function()
     local result = reviewing.core:apply_reconcile(reviewing.plan, actions)
     return { core = reviewing.core, result = result }
   end, function(ok, result)
     self.connecting = false
     self.reviewing = nil
+    progress:finish()
+    if not ok then
+      self:forget_credentials(reviewing.name)
+    end
     if ok then
       self:_activate(result.core)
       self:_run_connected_hook(result.core, function(hook_ok, hook_result)
@@ -462,6 +494,16 @@ end
 function M:cancel_review()
   self.reviewing = nil
   self.connecting = false
+end
+
+-- Every remote lookup below runs over SSH and can stall on an unreachable
+-- host, so each one reports itself while it is in flight.
+local function reporting(label, operation, callback)
+  local progress = Progress.start(label)
+  require("remote-mirror.async").run(operation, function(ok, result)
+    progress:finish()
+    callback(ok, result)
+  end)
 end
 
 -- Browsing happens before a project root exists, so the caller supplies the
@@ -490,7 +532,7 @@ function M:browse_remote_async(workspace, password, path, callback)
     callback(false, err)
     return
   end
-  require("remote-mirror.async").run(function()
+  reporting(("listing %s"):format(path or "the remote home directory"), function()
     return transport:list_directory(path)
   end, callback)
 end
@@ -503,7 +545,7 @@ function M:remote_ignore_at_async(workspace, password, path, callback)
     callback(false, err)
     return
   end
-  require("remote-mirror.async").run(function()
+  reporting(("reading %s/.remoteignore"):format(path), function()
     return transport:remote_ignore_info()
   end, callback)
 end
@@ -514,7 +556,7 @@ function M:write_remote_ignore_at_async(workspace, password, path, contents, cal
     callback(false, err)
     return
   end
-  require("remote-mirror.async").run(function()
+  reporting(("writing %s/.remoteignore"):format(path), function()
     transport:write_remote_ignore(contents)
     return true
   end, callback)
@@ -537,7 +579,7 @@ function M:inspect_workspace_async(workspace, password, callback)
   end
 
   local transport = Transport.new(config, require("remote-mirror.async").runner)
-  require("remote-mirror.async").run(function()
+  reporting(("inspecting %s:%s"):format(config.host, config.remote_root), function()
     local stats = transport:workspace_stats()
     stats.remote_ignore = transport:remote_ignore_info()
     return stats
@@ -559,7 +601,7 @@ function M:estimate_workspace_async(workspace, password, remote_ignore, callback
   local filter_path = util.join(config.state_root, "estimate-filter")
   util.write_file(filter_path, Ignore.compile(config.default_ignore, remote_ignore, {}))
   local transport = Transport.new(config, require("remote-mirror.async").runner)
-  require("remote-mirror.async").run(function()
+  reporting("estimating the filtered mirror size", function()
     return transport:estimate(filter_path, remote_ignore)
   end, callback)
 end
@@ -576,7 +618,7 @@ function M:write_remote_ignore_async(workspace, password, contents, callback)
     config._password = password
   end
   local transport = Transport.new(config, require("remote-mirror.async").runner)
-  require("remote-mirror.async").run(function()
+  reporting(("writing %s/.remoteignore"):format(config.remote_root), function()
     transport:write_remote_ignore(contents)
     return true
   end, callback)
@@ -593,6 +635,10 @@ function M:stop()
     pcall(Hooks.run, self.current.config, "onDisconnected")
     self.current:detach()
   end
+  for name in pairs(self.registry.workspaces) do
+    self:forget_credentials(name)
+  end
+  Progress.reset()
 end
 
 return M

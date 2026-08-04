@@ -147,7 +147,6 @@ local function save_workspace(manager, definition, password, reopen)
 end
 
 local function confirm_estimate(manager, definition, password, contents, write_ignore, reopen)
-  util.notify("estimating filtered mirror size")
   manager:estimate_workspace_async(definition, password, contents, function(ok, estimate)
     if not ok then
       util.notify(estimate, vim.log.levels.ERROR)
@@ -297,7 +296,6 @@ end
 local function edit_workspace_ignore(manager, workspace, on_close)
   local password = manager.credentials[workspace.name]
   local path = workspace.remote_root
-  util.notify("reading " .. path .. "/.remoteignore")
   manager:remote_ignore_at_async(workspace, password, path, function(ok, info)
     if not ok then
       util.notify(info, vim.log.levels.ERROR)
@@ -311,7 +309,6 @@ local function edit_workspace_ignore(manager, workspace, on_close)
       defaults = ignore_defaults(manager, workspace, path),
       save_hint = "writes .remoteignore",
       on_save = function(contents)
-        util.notify("writing " .. path .. "/.remoteignore")
         manager:write_remote_ignore_at_async(workspace, password, path, contents, function(write_ok, err)
           if not write_ok then
             util.notify(err, vim.log.levels.ERROR)
@@ -483,7 +480,6 @@ local function open_remote_browser(manager, workspace, password, on_select, on_c
       edit(rules.contents)
       return
     end
-    util.notify("reading " .. path .. "/.remoteignore")
     manager:remote_ignore_at_async(workspace, password, path, function(ok, info)
       if not ok then
         util.notify(info, vim.log.levels.ERROR)
@@ -548,7 +544,6 @@ local function add_workspace(manager, reopen)
         local rules = {}
         open_remote_browser(manager, base, password, function(remote_root)
           local definition = vim.tbl_extend("force", base, { remote_root = remote_root })
-          util.notify("inspecting remote workspace")
           manager:inspect_workspace_async(definition, password, function(inspect_ok, stats)
             if not inspect_ok then
               util.notify(stats, vim.log.levels.ERROR)
@@ -626,7 +621,6 @@ local function edit_workspace_connection(manager, workspace, connection, passwor
     return
   end
 
-  util.notify("checking " .. candidate.host .. ":" .. candidate.remote_root)
   manager:browse_remote_async(candidate, password, candidate.remote_root, function(ok)
     if ok then
       save(candidate.remote_root)
@@ -749,7 +743,6 @@ local function open_reconcile_editor(manager, workspace, reviewing, on_connected
     ):format(counts.pull, counts.push, counts.skip)
     confirm(prompt_text, "Apply reviewed changes", function()
       applying = true
-      util.notify("applying reviewed connection")
       manager:apply_review_async(actions, function(apply_ok, result)
         if not apply_ok then
           applying = false
@@ -842,8 +835,49 @@ function M.open(manager)
         or message:find("no password was provided", 1, true) ~= nil
     end
 
-    local function run(strategy, prompted_for_sudo)
-      util.notify("connecting to " .. workspace.name)
+    -- Every failed attempt drops the workspace's session secrets, because a
+    -- password the host refused must not be retried silently forever. Each
+    -- attempt therefore asks for whatever is missing rather than assuming the
+    -- screen already collected it.
+    local function with_credentials(callback)
+      local function continue_with_hook()
+        if not manager:has_remote_command_hook(workspace.name) or manager:has_hook_password(workspace.name) then
+          callback()
+          return
+        end
+        local ok, password = pcall(
+          vim.fn.inputsecret,
+          "Password for onRemoteCommand hook (blank if not needed): "
+        )
+        if not ok then
+          util.notify(password, vim.log.levels.ERROR)
+          return
+        end
+        manager:set_hook_password(workspace.name, password)
+        callback()
+      end
+
+      if workspace.auth ~= "password" or manager:has_password(workspace.name) then
+        continue_with_hook()
+        return
+      end
+      local ok, password = pcall(vim.fn.inputsecret, "Password for " .. workspace.name .. ": ")
+      if not ok then
+        util.notify(password, vim.log.levels.ERROR)
+        return
+      end
+      if password == "" then
+        util.notify("password is required", vim.log.levels.ERROR)
+        return
+      end
+      manager:set_password(workspace.name, password)
+      continue_with_hook()
+    end
+
+    -- `attempt` retries itself through `run` once a sudo password is known, so
+    -- the retry passes back through credential collection.
+    local run
+    local function attempt(strategy, prompted_for_sudo)
       manager:connect_async(workspace.name, strategy, function(ok, core)
         if not ok then
           if workspace.remote_sudo
@@ -881,21 +915,10 @@ function M.open(manager)
       end)
     end
 
-    local function prompt_for_hook_password(callback)
-      if not manager:has_remote_command_hook(workspace.name) or manager:has_hook_password(workspace.name) then
-        callback()
-        return
-      end
-      local ok, password = pcall(
-        vim.fn.inputsecret,
-        "Password for onRemoteCommand hook (blank if not needed): "
-      )
-      if not ok then
-        util.notify(password, vim.log.levels.ERROR)
-        return
-      end
-      manager:set_hook_password(workspace.name, password)
-      callback()
+    run = function(strategy, prompted_for_sudo)
+      with_credentials(function()
+        attempt(strategy, prompted_for_sudo)
+      end)
     end
 
     local function choose_strategy()
@@ -935,31 +958,20 @@ function M.open(manager)
             end
           )
         elseif choice == "Review changed paths" then
-          util.notify("comparing local and remote files")
-          manager:review_connect_async(workspace.name, function(ok, result)
-            if not ok then
-              util.notify(result, vim.log.levels.ERROR)
-              return
-            end
-            open_reconcile_editor(manager, workspace, result, connected)
+          with_credentials(function()
+            manager:review_connect_async(workspace.name, function(ok, result)
+              if not ok then
+                util.notify(result, vim.log.levels.ERROR)
+                return
+              end
+              open_reconcile_editor(manager, workspace, result, connected)
+            end)
           end)
         end
       end)
     end
 
-    if workspace.auth == "password" and not manager:has_password(workspace.name) then
-      local ok, password = pcall(vim.fn.inputsecret, "Password for " .. workspace.name .. ": ")
-      if not ok then
-        util.notify(password, vim.log.levels.ERROR)
-        return
-      end
-      if password == "" then
-        util.notify("password is required", vim.log.levels.ERROR)
-        return
-      end
-      manager:set_password(workspace.name, password)
-    end
-    prompt_for_hook_password(choose_strategy)
+    choose_strategy()
   end
 
   vim.keymap.set("n", "<CR>", connect, { buffer = buffer, nowait = true })
@@ -1089,8 +1101,7 @@ function M.open_workspace(manager, core)
     return paths[vim.api.nvim_win_get_cursor(0)[1] - 6]
   end
 
-  local function run_and_reopen(operation, success_message)
-    util.notify("workspace operation started")
+  local function run_and_reopen(label, operation, success_message)
     core:enqueue(operation, function(ok, result)
       if not ok then
         util.notify(result, vim.log.levels.ERROR)
@@ -1102,7 +1113,7 @@ function M.open_workspace(manager, core)
       if vim.api.nvim_buf_is_valid(buffer) then
         M.open_workspace(manager, core)
       end
-    end)
+    end, label)
   end
 
   vim.keymap.set("n", "<CR>", function()
@@ -1118,27 +1129,27 @@ function M.open_workspace(manager, core)
         return
       end
       vim.cmd.edit(vim.fn.fnameescape(local_path))
-    end)
+    end, ("downloading %s"):format(path))
   end, { buffer = buffer, nowait = true })
   vim.keymap.set("n", "c", function()
     M.open(manager)
   end, { buffer = buffer, nowait = true })
   vim.keymap.set("n", "p", function()
-    run_and_reopen(function()
+    run_and_reopen(("pulling %s"):format(core.config.name), function()
       return core:pull()
     end, function(result)
       return ("pulled %d remote files"):format(result.files)
     end)
   end, { buffer = buffer, nowait = true })
   vim.keymap.set("n", "P", function()
-    run_and_reopen(function()
+    run_and_reopen(("pushing %s"):format(core.config.name), function()
       return core:push()
     end, function(result)
       return ("pushed %d files; %d conflicts"):format(result.pushed, result.conflicts)
     end)
   end, { buffer = buffer, nowait = true })
   vim.keymap.set("n", "r", function()
-    run_and_reopen(function()
+    run_and_reopen(("refreshing %s"):format(core.config.name), function()
       return core:refresh()
     end, function(result)
       return ("found %d remote changes; %d conflicts"):format(result.changed, result.conflicts)

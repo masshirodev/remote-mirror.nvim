@@ -48,9 +48,16 @@ function M.write_file(path, content)
   end
 end
 
+-- The second return value is set only when a file is present but could not be
+-- read. An unreadable file is not an absent one: reporting it as missing makes
+-- a push delete its remote counterpart, so the difference has to survive.
 function M.hash_file(path)
-  local content = M.read_file(path)
+  local content, err = M.read_file(path)
   if content == nil then
+    local stat = vim.uv.fs_stat(path)
+    if stat and stat.type == "file" then
+      return nil, err or "could not be read"
+    end
     return nil
   end
   return vim.fn.sha256(content)
@@ -74,12 +81,24 @@ function M.relative_path(root, path)
   return path:sub(#prefix + 1)
 end
 
+-- Returns the mirrored files by hash, and the paths that exist but could not be
+-- listed or read. Losing a path silently is what makes a missing filesystem
+-- permission dangerous rather than merely inconvenient, so the second value is
+-- reported instead of being folded into the first.
 function M.walk_files(root)
   local files = {}
+  local unreadable = {}
 
   local function visit(directory, prefix)
-    local handle = vim.uv.fs_scandir(directory)
+    local handle, scan_error = vim.uv.fs_scandir(directory)
     if not handle then
+      -- A mirror that has not been created yet is absent, not unreadable.
+      if vim.uv.fs_stat(directory) then
+        table.insert(unreadable, {
+          path = prefix ~= "" and prefix or ".",
+          reason = scan_error or "could not be listed",
+        })
+      end
       return
     end
     while true do
@@ -92,13 +111,33 @@ function M.walk_files(root)
       if kind == "directory" then
         visit(absolute, relative)
       elseif kind == "file" then
-        files[relative] = M.hash_file(absolute)
+        local hash, reason = M.hash_file(absolute)
+        if hash then
+          files[relative] = hash
+        elseif reason then
+          table.insert(unreadable, { path = relative, reason = reason })
+        end
       end
     end
   end
 
   visit(root, "")
-  return files
+  table.sort(unreadable, function(left, right)
+    return left.path < right.path
+  end)
+  return files, unreadable
+end
+
+function M.unreadable_message(unreadable)
+  local named = {}
+  for index, entry in ipairs(unreadable) do
+    if index > 5 then
+      table.insert(named, ("and %d more"):format(#unreadable - 5))
+      break
+    end
+    table.insert(named, ("%s (%s)"):format(entry.path, entry.reason))
+  end
+  return ("%d local path(s) could not be read: %s"):format(#unreadable, table.concat(named, ", "))
 end
 
 function M.walk_directories(root)
@@ -188,7 +227,7 @@ function M.format_bytes(bytes)
 end
 
 function M.notify(message, level)
-  vim.notify("remote-mirror: " .. message, level or vim.log.levels.INFO)
+  return require("remote-mirror.notify").show(message, level or vim.log.levels.INFO)
 end
 
 return M

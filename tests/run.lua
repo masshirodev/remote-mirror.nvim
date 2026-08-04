@@ -2153,6 +2153,302 @@ test("lifecycle hooks run with workspace environment", function()
   assert_equal("website\ndeploy\n/srv/website", require("remote-mirror.util").read_file(config.mirror_root .. "/hook-output"))
 end)
 
+-- Only root can read a file whose mode denies it, so the permission tests
+-- verify the situation they need before asserting anything about it.
+local function make_unreadable(path)
+  vim.uv.fs_chmod(path, 0)
+  return io.open(path, "rb") == nil
+end
+
+test("an unreadable file is reported instead of counting as absent", function()
+  local util = require("remote-mirror.util")
+  local root = vim.fn.tempname()
+  util.ensure_dir(root)
+  util.write_file(util.join(root, "readable.txt"), "readable\n")
+  util.write_file(util.join(root, "secret.txt"), "secret\n")
+  if not make_unreadable(util.join(root, "secret.txt")) then
+    return
+  end
+
+  local hash, reason = util.hash_file(util.join(root, "secret.txt"))
+  assert_equal(nil, hash)
+  assert(reason, "an unreadable file must report why")
+  assert_equal(nil, util.hash_file(util.join(root, "missing.txt")))
+
+  local files, unreadable = util.walk_files(root)
+  assert_equal(nil, files["secret.txt"])
+  assert(files["readable.txt"])
+  assert_equal(1, #unreadable)
+  assert_equal("secret.txt", unreadable[1].path)
+  assert(util.unreadable_message(unreadable):find("secret.txt", 1, true))
+end)
+
+test("an unlistable directory is reported instead of counting as empty", function()
+  local util = require("remote-mirror.util")
+  local root = vim.fn.tempname()
+  util.ensure_dir(util.join(root, "locked"))
+  util.write_file(util.join(root, "locked", "inside.txt"), "inside\n")
+  vim.uv.fs_chmod(util.join(root, "locked"), 0)
+  if vim.uv.fs_scandir(util.join(root, "locked")) ~= nil then
+    vim.uv.fs_chmod(util.join(root, "locked"), 448)
+    return
+  end
+
+  local files, unreadable = util.walk_files(root)
+  assert_equal({}, files)
+  assert_equal(1, #unreadable)
+  assert_equal("locked", unreadable[1].path)
+  vim.uv.fs_chmod(util.join(root, "locked"), 448)
+
+  -- A mirror that has not been created yet is absent, not unreadable.
+  local _, absent = util.walk_files(vim.fn.tempname())
+  assert_equal({}, absent)
+end)
+
+test("an unreadable file is never pushed as a deletion", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+  })
+  local util = require("remote-mirror.util")
+  util.ensure_dir(config.source_root)
+  local path = util.join(config.source_root, "secret.txt")
+  util.write_file(path, "secret\n")
+  if not make_unreadable(path) then
+    return
+  end
+
+  local deleted, uploaded = {}, {}
+  local State = require("remote-mirror.state")
+  local state = State.new(config)
+  state.data.files["secret.txt"] = {
+    remote_hash = "baseline",
+    local_hash = "baseline",
+    materialized = true,
+  }
+  local core = require("remote-mirror.core").new(config, {
+    state = state,
+    transport = {
+      inspect = function()
+        return { hash = "baseline" }
+      end,
+      upload = function(_, name)
+        table.insert(uploaded, name)
+      end,
+      delete = function(_, name)
+        table.insert(deleted, name)
+      end,
+    },
+  })
+
+  local pushed, message = pcall(core.push_file, core, "secret.txt", true)
+  assert_equal(false, pushed)
+  assert(message:find("not treated as a deletion", 1, true), message)
+  assert_equal({}, deleted)
+  assert_equal({}, uploaded)
+
+  local bulk_ok, bulk_message = pcall(core.push, core)
+  assert_equal(false, bulk_ok)
+  assert(bulk_message:find("could not be read", 1, true), bulk_message)
+  assert_equal({}, deleted)
+end)
+
+test("an unreadable file does not enter the upload queue", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+    watch = false,
+    debounce_ms = 10,
+  })
+  local util = require("remote-mirror.util")
+  util.ensure_dir(config.source_root)
+  local path = util.join(config.source_root, "secret.txt")
+  util.write_file(path, "secret\n")
+  if not make_unreadable(path) then
+    return
+  end
+
+  local deleted = {}
+  local core = require("remote-mirror.core").new(config, {
+    transport = {
+      inspect = function()
+        return nil
+      end,
+      upload = function() end,
+      delete = function(_, name)
+        table.insert(deleted, name)
+      end,
+    },
+  })
+  core.state.data.files["secret.txt"] = {
+    remote_hash = "baseline",
+    local_hash = "baseline",
+    materialized = true,
+  }
+  core:schedule_upload("secret.txt")
+  assert_equal({}, core.pending)
+  vim.wait(100)
+  assert_equal({}, deleted)
+end)
+
+test("a failed connection forgets the workspace password", function()
+  local manager = require("remote-mirror.manager").new({
+    registry_path = vim.fn.tempname() .. "/workspaces.json",
+  })
+  manager:add({
+    name = "website",
+    host = "server",
+    remote_root = "/srv/website",
+    auth = "password",
+    mirror_root = vim.fn.tempname(),
+  })
+  manager:set_password("website", "wrong")
+  manager:set_sudo_password("website", "wrong-sudo")
+  manager:set_hook_password("website", "wrong-hook")
+
+  local failure
+  manager:connect_async("website", "force_pull", function(ok, err)
+    failure = not ok and err or nil
+  end)
+  assert(vim.wait(5000, function()
+    return failure ~= nil
+  end), "the connection to a nonexistent host must fail")
+
+  assert_equal(false, manager:has_password("website"))
+  assert_equal(false, manager:has_sudo_password("website"))
+  assert_equal(false, manager:has_hook_password("website"))
+end)
+
+test("disconnecting forgets the workspace password", function()
+  local config = require("remote-mirror.config").normalize({
+    name = "website",
+    host = "server",
+    remote_root = "/srv/website",
+    mirror_root = vim.fn.tempname(),
+    watch = false,
+  })
+  local core = require("remote-mirror.core").new(config)
+  core:ensure_layout()
+  local manager = require("remote-mirror.manager").new({
+    registry_path = vim.fn.tempname() .. "/workspaces.json",
+  })
+  manager:set_password("website", "session-secret")
+  manager:set_sudo_password("website", "session-sudo")
+  manager:_activate(core)
+
+  manager:disconnect()
+  assert_equal(false, manager:has_password("website"))
+  assert_equal(false, manager:has_sudo_password("website"))
+end)
+
+test("queued operations report themselves while they run", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+  })
+  local Progress = require("remote-mirror.progress")
+  Progress.reset()
+  assert_equal("", Progress.status())
+
+  local core = require("remote-mirror.core").new(config)
+  local observed, completed
+  core:enqueue(function()
+    observed = Progress.status()
+    require("remote-mirror.async").runner({ "sh", "-c", "true" })
+  end, function(ok)
+    completed = ok
+  end, "pulling example")
+
+  assert(vim.wait(1000, function()
+    return completed ~= nil
+  end))
+  assert_equal(true, completed)
+  assert(observed:find("pulling example", 1, true), observed)
+  assert_equal("", Progress.status())
+  assert_equal(false, Progress.active())
+end)
+
+test("rsync transfer progress reaches the status indicator", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+  })
+  local Progress = require("remote-mirror.progress")
+  Progress.reset()
+  local handle = Progress.start("pulling example")
+
+  local captured
+  local runner = function(command, options)
+    captured = { command = command, options = options }
+    options.on_stdout("\r    103,809,024  31%   11.03MB/s    0:00:19 (xfr#118, to-chk=724/1042)\r")
+    return { code = 0, stdout = "", stderr = "" }
+  end
+  require("remote-mirror.transport").new(config, runner):pull("/tmp/filter")
+
+  assert_contains(captured.command, "--info=progress2")
+  local status = Progress.status()
+  assert(status:find("31%%"), status)
+  assert(status:find("99.0 MiB", 1, true), status)
+  assert(status:find("318/1042 files", 1, true), status)
+  handle:finish()
+  assert_equal("", Progress.status())
+end)
+
+test("rsync progress can be turned off per workspace", function()
+  local config = require("remote-mirror.config").normalize({
+    host = "server",
+    remote_root = "/srv/example",
+    mirror_root = vim.fn.tempname(),
+    rsync_progress = false,
+  })
+  local captured
+  local runner = function(command, options)
+    captured = { command = command, options = options }
+    return { code = 0, stdout = "", stderr = "" }
+  end
+  require("remote-mirror.transport").new(config, runner):push("/tmp/filter")
+  assert_equal(nil, captured.options.on_stdout)
+  for _, argument in ipairs(captured.command) do
+    assert(argument ~= "--info=progress2", "progress must not be requested when it is disabled")
+  end
+end)
+
+test("watched output is still returned to the caller that parses it", function()
+  local collected = {}
+  local result = require("remote-mirror.process").run({ "sh", "-c", "printf watched" }, {
+    on_stdout = function(chunk)
+      table.insert(collected, chunk)
+    end,
+  })
+  assert_equal("watched", result.stdout)
+  assert_equal("watched", table.concat(collected))
+end)
+
+test("transfer failures are summarized without losing their output", function()
+  local notify = require("remote-mirror.notify")
+  local described = notify.describe(
+    "ssh failed (255): deploy@server: Permission denied, please try again.\ndeploy@server: Permission denied (publickey,password)."
+  )
+  assert_equal("the SSH password was rejected", described.summary)
+  assert(described.detail:find("publickey", 1, true), described.detail)
+
+  local plain = notify.describe("pulled 12 remote files")
+  assert_equal("pulled 12 remote files", plain.summary)
+  assert_equal(nil, plain.detail)
+
+  local before = #notify.history
+  notify.show("could not resolve hostname server", vim.log.levels.ERROR)
+  assert_equal(before + 1, #notify.history)
+  local entry = notify.history[#notify.history]
+  assert_equal("error", entry.level_name)
+  assert_equal("the host name could not be resolved", entry.summary)
+  assert(find_prefixed(notify.messages(), entry.at .. "  error"), "the log must keep the message")
+end)
+
 for _, item in ipairs(tests) do
   local ok, err = pcall(item.callback)
   if ok then

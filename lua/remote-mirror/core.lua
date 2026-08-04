@@ -1,4 +1,5 @@
 local ignore = require("remote-mirror.ignore")
+local Progress = require("remote-mirror.progress")
 local State = require("remote-mirror.state")
 local Transport = require("remote-mirror.transport")
 local util = require("remote-mirror.util")
@@ -19,10 +20,14 @@ function M.new(config, dependencies)
   }, M)
 end
 
-function M:enqueue(operation, callback)
+-- `label` names the work for the progress indicator. Operations without one
+-- run silently, which suits the short checks that finish before a spinner
+-- would appear.
+function M:enqueue(operation, callback, label)
   table.insert(self.operation_queue, {
     operation = operation,
     callback = callback,
+    label = label,
   })
   self:_drain_operations()
 end
@@ -49,8 +54,12 @@ function M:_drain_operations()
   end
   self.operation_active = true
   local item = table.remove(self.operation_queue, 1)
+  local progress = item.label and Progress.start(item.label) or nil
   require("remote-mirror.async").run(item.operation, function(ok, result)
     self.operation_active = false
+    if progress then
+      progress:finish()
+    end
     if item.callback then
       item.callback(ok, result)
     end
@@ -82,10 +91,26 @@ function M:ensure_layout()
   util.ensure_dir(self.config.tree_root)
 end
 
+-- A mirrored file the process cannot read looks exactly like one that was
+-- deleted, and every operation that infers a deletion from a missing entry
+-- would then remove the remote copy. Those callers pass `strict` and refuse to
+-- run; the rest report the paths so the cause is visible instead of silent.
+function M:_local_files(strict)
+  local files, unreadable = util.walk_files(self.config.source_root)
+  if #unreadable > 0 then
+    local message = util.unreadable_message(unreadable)
+    if strict then
+      error("remote-mirror: refusing to continue because " .. message, 0)
+    end
+    util.notify(message, vim.log.levels.WARN)
+  end
+  return files
+end
+
 function M:refresh()
   self:ensure_layout()
   local remote = self.transport:manifest()
-  local local_files = util.walk_files(self.config.source_root)
+  local local_files = self:_local_files(false)
   local changed, conflicts = 0, 0
 
   for path, metadata in pairs(remote) do
@@ -291,7 +316,16 @@ end
 
 function M:push_file(path, force, expected_remote_hash, check_expected)
   local absolute = util.join(self.config.source_root, path)
-  local local_hash = util.hash_file(absolute)
+  local local_hash, unreadable = util.hash_file(absolute)
+  -- Without this the file below would be deleted on the remote host, because
+  -- an unreadable local copy hashes to nothing at all.
+  assert(
+    not unreadable,
+    ("remote-mirror: %s is present locally but could not be read (%s); it was not treated as a deletion"):format(
+      path,
+      unreadable
+    )
+  )
   local entry = self.state.data.files[path]
   local remote_metadata = self.transport:inspect(path)
   local remote_hash = remote_metadata and remote_metadata.hash or nil
@@ -434,7 +468,7 @@ end
 
 function M:push()
   self:ensure_layout()
-  local local_files = util.walk_files(self.config.source_root)
+  local local_files = self:_local_files(true)
   local paths = {}
   for path, hash in pairs(local_files) do
     local entry = self.state.data.files[path]
@@ -649,7 +683,7 @@ function M:schedule_poll(on_complete)
     if on_complete then
       on_complete(ok, result)
     end
-  end)
+  end, ("checking %d open file(s)"):format(#targets))
   return true
 end
 
@@ -677,7 +711,17 @@ function M:schedule_upload(path)
   if self.detached then
     return
   end
-  local local_hash = util.hash_file(util.join(self.config.source_root, path))
+  local local_hash, unreadable = util.hash_file(util.join(self.config.source_root, path))
+  if unreadable then
+    util.notify(
+      ("%s could not be read (%s); it was neither uploaded nor deleted on the remote host"):format(
+        path,
+        unreadable
+      ),
+      vim.log.levels.ERROR
+    )
+    return
+  end
   local entry = self.state.data.files[path]
   if (local_hash and entry and local_hash == entry.local_hash)
     or (not local_hash and (not entry or not entry.materialized))
@@ -703,14 +747,15 @@ function M:schedule_upload(path)
         util.notify(("%s was not uploaded because the remote changed"):format(path), vim.log.levels.WARN)
       end
 
-      local local_hash = util.hash_file(util.join(self.config.source_root, path))
+      local local_hash, still_unreadable = util.hash_file(util.join(self.config.source_root, path))
       local entry = self.state.data.files[path]
-      if (local_hash and (not entry or local_hash ~= entry.local_hash))
-        or (not local_hash and entry and entry.materialized)
+      if not still_unreadable
+        and ((local_hash and (not entry or local_hash ~= entry.local_hash))
+          or (not local_hash and entry and entry.materialized))
       then
         self:schedule_upload(path)
       end
-    end)
+    end, ("uploading %s"):format(path))
   end, self.config.debounce_ms)
 end
 

@@ -18,6 +18,7 @@ local defaults = {
   transfer = "rsync",
   rsync_command = "rsync",
   rsync_args = { "-az" },
+  rsync_progress = true,
   scp_command = "scp",
   scp_args = {},
   remote_find_command = "find",
@@ -91,6 +92,7 @@ function M.normalize(options)
     "remote-mirror: transfer must be rsync or scp"
   )
   assert(type(options.remote_sudo) == "boolean", "remote-mirror: remote_sudo must be a boolean")
+  assert(type(options.rsync_progress) == "boolean", "remote-mirror: rsync_progress must be a boolean")
   assert(
     options.remote_sudo_auth == "passwordless" or options.remote_sudo_auth == "password",
     "remote-mirror: remote_sudo_auth must be passwordless or password"

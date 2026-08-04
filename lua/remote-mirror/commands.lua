@@ -11,14 +11,14 @@ local function safely(callback)
   end
 end
 
-local function enqueue(core, operation, on_success)
+local function enqueue(core, label, operation, on_success)
   core:enqueue(operation, function(ok, result)
     if not ok then
       util.notify(result, vim.log.levels.ERROR)
       return
     end
     on_success(result)
-  end)
+  end, label)
 end
 
 function M.register(manager)
@@ -33,6 +33,7 @@ function M.register(manager)
     "RemoteMirrorPoll",
     "RemoteMirrorConflicts",
     "RemoteMirrorResolve",
+    "RemoteMirrorMessages",
   }
   for _, name in ipairs(command_names) do
     pcall(vim.api.nvim_del_user_command, name)
@@ -84,7 +85,7 @@ function M.register(manager)
 
   vim.api.nvim_create_user_command("RemoteMirrorPull", safely(function()
     local core = manager:require_current()
-    enqueue(core, function()
+    enqueue(core, ("pulling %s"):format(core.config.name), function()
       return core:pull()
     end, function(result)
       util.notify(("pulled %d remote files; protected %d local changes"):format(result.files, #result.protected))
@@ -93,7 +94,7 @@ function M.register(manager)
 
   vim.api.nvim_create_user_command("RemoteMirrorPush", safely(function()
     local core = manager:require_current()
-    enqueue(core, function()
+    enqueue(core, ("pushing %s"):format(core.config.name), function()
       return core:push()
     end, function(result)
       util.notify(("pushed %d files; %d conflicts"):format(result.pushed, result.conflicts))
@@ -102,7 +103,7 @@ function M.register(manager)
 
   vim.api.nvim_create_user_command("RemoteMirrorRefresh", safely(function()
     local core = manager:require_current()
-    enqueue(core, function()
+    enqueue(core, ("refreshing %s"):format(core.config.name), function()
       return core:refresh()
     end, function(result)
       util.notify(("found %d remote changes; %d conflicts"):format(result.changed, result.conflicts))
@@ -129,7 +130,7 @@ function M.register(manager)
     local path, strategy = options.args:match("^(%S+)%s+(%S+)$")
     assert(path and strategy, "usage: RemoteMirrorResolve <path> <pull|push>")
     local core = manager:require_current()
-    enqueue(core, function()
+    enqueue(core, ("resolving %s"):format(path), function()
       core:resolve(path, strategy)
       return true
     end, function()
@@ -139,6 +140,24 @@ function M.register(manager)
     nargs = "+",
     desc = "Resolve a conflict with the local or remote version",
   })
+
+  -- Popups time out so they never sit on top of the file being edited, which
+  -- means the text of a failure has to remain readable somewhere afterwards.
+  vim.api.nvim_create_user_command("RemoteMirrorMessages", safely(function()
+    local notify = require("remote-mirror.notify")
+    notify.dismiss()
+    local lines = notify.messages()
+
+    local buffer = vim.api.nvim_create_buf(false, true)
+    vim.bo[buffer].buftype = "nofile"
+    vim.bo[buffer].bufhidden = "wipe"
+    vim.bo[buffer].swapfile = false
+    vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
+    vim.bo[buffer].modifiable = false
+    vim.api.nvim_set_current_buf(buffer)
+    vim.api.nvim_win_set_cursor(0, { #lines, 0 })
+    vim.keymap.set("n", "q", "<Cmd>bdelete<CR>", { buffer = buffer, nowait = true })
+  end), { desc = "Show the remote-mirror message log in full" })
 
   vim.api.nvim_create_autocmd("BufWritePost", {
     group = group,
