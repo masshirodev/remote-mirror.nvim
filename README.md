@@ -590,3 +590,7 @@ Run the headless test suite:
 ```sh
 make test
 ```
+
+CI (`.github/workflows/ci.yml`) runs it on every push to `main` and every pull
+request, on Neovim 0.10 (the oldest this README promises), the latest release,
+and nightly.
